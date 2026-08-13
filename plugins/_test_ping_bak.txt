@@ -1,0 +1,26 @@
+﻿# -*- coding: utf-8 -*-
+"""
+示例外置插件：Ping（ping）
+
+发送「ping」机器人回「pong」，用于验证 bot 是否在线、外置插件是否生效。
+放在 plugins/ 下即被自动加载，支持热加载（不重启 bot）。
+删除本文件或点控制台「插件管理 → 热加载」即可停用。
+"""
+
+PLUGIN = {
+    "key": "ping",
+    "name": "Ping 插件",
+    "priority": 500,
+    "description": "发送「ping」机器人回「pong」，用于连通性自测",
+}
+
+_TRIGGER = "ping"
+
+
+async def handle(ctx) -> bool:
+    """统一分发入口。返回 True 表示已处理，False 表示放行。"""
+    content = (ctx.content or "").strip()
+    if content != _TRIGGER:
+        return False
+    await ctx.reply("pong")
+    return True

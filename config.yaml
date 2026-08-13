@@ -1,0 +1,17 @@
+# botpy 机器人配置文件
+# 在 QQ 开放平台 (https://q.qq.com) 创建机器人后获取以下信息
+
+# 机器人 AppID
+appid: "YOUR_APPID"
+
+# 机器人 Token
+token: "YOUR_TOKEN"
+
+# 沙箱环境可在此填写沙箱频道 ID（可选）
+# sandbox_guild_id: "xxxxxxxx"
+
+# 事件接收方式: websocket / webhook
+event_mode: "websocket"
+
+# 运行环境: sandbox / production
+environment: "production"

@@ -1,0 +1,7 @@
+{
+  "key": "genshin",
+  "name": "原神查询",
+  "description": "原神玩家面板/练度查询 (Enka Network，无需 cookie)；UID 可绑定后下次发角色名直查",
+  "priority": 500,
+  "category": "game"
+}
