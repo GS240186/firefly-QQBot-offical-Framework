@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "note": "扁平结构：每个插件 <key>.py + <key>.meta.json 平铺在仓库根目录（无子目录）。index.json 仅列 key 与 path；展示用的 name/description/category/priority 从各 <key>.meta.json 读取。",
+  "plugins": [
+    { "key": "genshin", "path": "genshin.py" },
+    { "key": "starrail", "path": "starrail.py" }
+  ]
+}

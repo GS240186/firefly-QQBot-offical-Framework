@@ -1,0 +1,138 @@
+# -*- coding: utf-8 -*-
+"""
+原神查询外置插件（小流萤 · plugins/）
+
+数据源：Enka Network 公开 API（https://enka.network/api/uid/{uid}）
+- 无需米游社 cookie、无需登录、无封号风险；
+- 返回玩家冒险等级 / 世界等级 / 成就数 / 展示角色（含等级、好感）。
+
+触发方式（群里或私聊 @机器人）：
+- 原神 uid 123456789
+- 原神面板 123456789
+- ys 123456789
+- 原神 123456789
+- 原神帮助
+
+这是「外置插件」，放在 plugins/ 下即被自动加载，支持热加载（不重启 bot）。
+删除本文件或点控制台「插件管理 → 热加载」即可停用。
+"""
+
+import asyncio
+import json
+import os
+import re
+
+PLUGIN = {
+    "key": "genshin",
+    "name": "原神查询",
+    "priority": 500,
+    "description": "原神玩家面板查询（Enka Network，无需 cookie）：发送「原神 uid 123456789」",
+}
+
+ENKA_URL = "https://enka.network/api/uid/{uid}"
+UA = "Mozilla/5.0 (XiaoLiuYingBot) genshin-plugin"
+TIMEOUT = 12
+
+# avatarId -> 中文名（取自 GenshinUID 6.7.0 映射，共 125 条）
+AVATAR_ID2NAME = __AVATAR_MAP__
+
+REGION_MAP = {
+    "cn_gf01": "国服·天空岛",
+    "cn_qd01": "国服·世界树",
+    "os_usa": "美服",
+    "os_euro": "欧服",
+    "os_asia": "亚服",
+    "os_cht": "港澳台服",
+}
+
+_TRIGGER_RE = re.compile(r"(?:原神|ys|genshin)\s*(?:uid|面板|uid:)?\s*(\d{8,11})", re.IGNORECASE)
+_HELP_RE = re.compile(r"^(原神|ys|genshin)\s*(帮助|help|用法)$", re.IGNORECASE)
+
+_HELP_TEXT = (
+    "【原神查询 · 用法】\n"
+    "直接发送：原神 uid 123456789\n"
+    "也支持：原神面板 123456789 / ys 123456789 / 原神 123456789\n"
+    "数据源：Enka Network 公开 API（无需 cookie，查他人公开面板）\n"
+    "提示：对方需在游戏内打开「角色展柜」才能查到展示角色。"
+)
+
+
+async def query_enka(uid):
+    """拉取并解析 Enka 玩家面板。返回统一 dict；失败时含 'error' 键。"""
+    try:
+        import aiohttp
+    except Exception:
+        return {"error": "运行环境缺少 aiohttp"}
+    url = ENKA_URL.format(uid=uid)
+    try:
+        async with aiohttp.ClientSession(headers={"User-Agent": UA}) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
+                if resp.status != 200:
+                    return {"error": "Enka 返回 HTTP %s（可能 UID 不存在或服务器维护）" % resp.status}
+                data = await resp.json(content_type=None)
+    except asyncio.TimeoutError:
+        return {"error": "查询超时（Enka 无响应，请重试）"}
+    except Exception as e:
+        return {"error": "查询失败：%s" % e}
+    return parse_enka(data, uid)
+
+
+def parse_enka(data, uid):
+    if not isinstance(data, dict):
+        return {"error": "数据格式异常"}
+    if "playerInfo" not in data:
+        return {"error": "Enka 服务器维护中，或该 UID 不存在"}
+    player = data.get("playerInfo", {})
+    chars = []
+    for c in data.get("avatarInfoList", []) or []:
+        aid = str(c.get("avatarId"))
+        name = AVATAR_ID2NAME.get(aid, "角色#%s" % aid)
+        level = c.get("propMap", {}).get("4001", {}).get("val", 0)
+        friendship = c.get("fetterInfo", {}).get("expLevel", 0)
+        chars.append({"name": name, "level": level, "friendship": friendship})
+    chars.sort(key=lambda x: -int(x["level"] or 0))
+    return {
+        "uid": uid,
+        "nickname": player.get("nickname", ""),
+        "level": player.get("level", 0),
+        "world_level": player.get("worldLevel", 0),
+        "achievements": player.get("finishAchievementNum", 0),
+        "region": data.get("region", ""),
+        "signature": (player.get("signature") or "").strip(),
+        "chars": chars,
+    }
+
+
+def render_text(panel):
+    if "error" in panel:
+        return "❌ 原神查询失败：" + panel["error"]
+    region = REGION_MAP.get(panel.get("region", ""), panel.get("region", ""))
+    lines = []
+    lines.append("【原神面板】%s" % panel["nickname"])
+    lines.append("UID %s · %s" % (panel["uid"], region or "未知区服"))
+    lines.append("冒险等级 %s · 世界等级 %s · 成就 %s" % (panel["level"], panel["world_level"], panel["achievements"]))
+    sig = panel.get("signature")
+    if sig:
+        lines.append("签名：%s" % sig)
+    chars = panel.get("chars", [])
+    if not chars:
+        lines.append("— 未展示角色展柜（请在游戏内打开角色展柜）—")
+    else:
+        lines.append("展示角色 %d 个：" % len(chars))
+        for c in chars:
+            lines.append("  · %s Lv%s（好感%s）" % (c["name"], c["level"], c["friendship"]))
+    return "\n".join(lines)
+
+
+async def handle(ctx) -> bool:
+    content = (ctx.content or "").strip()
+    if _HELP_RE.match(content):
+        await ctx.reply(_HELP_TEXT)
+        return True
+    m = _TRIGGER_RE.search(content)
+    if not m:
+        return False
+    uid = m.group(1)
+    panel = await query_enka(uid)
+    await ctx.reply(render_text(panel))
+    return True
