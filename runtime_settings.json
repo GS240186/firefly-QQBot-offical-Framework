@@ -1,0 +1,9 @@
+{
+  "global": {
+    "media.storage.ttl_days": 0,
+    "ignore_bot_messages": true,
+    "plugin.market.repo_url": "https://cdn.jsdelivr.net/gh/GS240186/firefiy-QQofficial-bot-piugins@main/"
+  },
+  "bots": {},
+  "groups": {}
+}
