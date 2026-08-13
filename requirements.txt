@@ -1,0 +1,2 @@
+qq-botpy>=1.2.1
+aiohttp>=3.8.0

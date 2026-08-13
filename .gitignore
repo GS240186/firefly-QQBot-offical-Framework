@@ -1,0 +1,26 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+env/
+.env
+
+# ===== Node =====
+node_modules/
+
+# ===== 日志（运行期产生，不纳入源码） =====
+*.log
+botpy.log
+
+# ===== WorkBuddy 内部数据（非 bot 源码，含内部 memory/路径约定） =====
+.workbuddy/
+
+# ===== OS / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 注意：data/*.json（绑定/群配置/密钥等）与 outputs/ 默认不忽略，
+# 由维护者逐项确认敏感信息后再决定是否提交。
