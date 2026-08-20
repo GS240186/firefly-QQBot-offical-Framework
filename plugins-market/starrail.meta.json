@@ -1,7 +1,0 @@
-{
-  "key": "starrail",
-  "name": "星铁面板",
-  "description": "playwright 截 Enka 展柜/角色详情;支持多UID绑定/列表/切换/删除/更新面板/查角色",
-  "priority": 470,
-  "category": "game"
-}
