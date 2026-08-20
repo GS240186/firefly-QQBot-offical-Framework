@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """全局配置"""
 
-# 机器人凭证
-APPID = "YOUR_APPID"
-SECRET = "YOUR_BOT_TOKEN"
+# 机器人凭证（启动时如需在管理后台看到机器人，请通过 data/bots.json 配置；留空 = 列表为空）
+APPID = ""
+SECRET = ""
 
-# 第三方API配置（按需填写）
+# 第三方API配置（按需填写；留空则在调用对应功能时自动回退或提示）
 # 视频解析 API（ALAPI，关注公众号免费获取token）
 VIDEO_PARSE_TOKEN = ""
 
@@ -13,13 +13,14 @@ VIDEO_PARSE_TOKEN = ""
 # 支持 20+ 平台：抖音 / 快手 / 小红书 / B站 / 视频号 / 油管 / TikTok /
 # 西瓜视频 / 好看视频 / 微视 / 梨视频 / 微博 / 知乎 / AcFun / 皮皮虾等
 # 返回结构：{"code":200,"msg":"success","data":{type,title,desc,cover,url,video_backup,images,...}}
-DWO_VIDEO_PARSE_KEY = "EU1UX26RA2BPXWCWH8Z4"  # ckey
+# 获取地址：https://api.dwo.cc  → 注册 → 控制台 → ckey
+DWO_VIDEO_PARSE_KEY = ""
 
 # QQ信息查询 API（按优先级依次尝试）
 # 方案1：川源科技 dwo.cc qqxxcx（需 ckey，全套资料：昵称/QID/等级/注册时间/签名/vip）
 # 文档地址：https://api.dwo.cc/api/192
 DWO_QQ_FULL_URL = "https://openapi.dwo.cc/api/qqxxcx"
-DWO_QQ_CKEY = "EU1UX26RA2BPXWCWH8Z4"  # 用户的 ckey
+DWO_QQ_CKEY = ""
 
 # 方案2：川源科技 openapi.dwo.cc/qqnet（免KEY，提供 detail_info/services: 会员/活跃天数/开通业务等）
 # 文档地址：https://api.dwo.cc/api/15
@@ -36,12 +37,23 @@ SHWGIJ_KEY = ""
 # 方案5：小渡API（需KEY，提供注册时间/签名/名片等详细字段）
 # 注：小渡 v2.xxapi.cn/api/qqinfo 当前KEY在该平台没有该接口权限
 # 同时用于「天气查询」（openapi.dwo.cc/api/weather_gd 的 ckey）
-QQ_INFO_KEY = "YOUR_BOT_TOKEN"
+# 获取地址：https://api.dwo.cc  → 注册 → 控制台 → ckey
+QQ_INFO_KEY = ""
+
+# 天气查询 - 接口盒子（apihz.cn 中国气象局数据源）
+# 接口：https://cn.apihz.cn/api/tianqi/tqyb.php
+# 必填 id(数字ID) / key(通讯密钥)；place=城市名（省 sheng 参数可选，接口自动识别）
+# 可选 day=1~7 多天预报；返回 code=200 成功
+# 优势：实时温度/湿度/风力、预警信息(alarm)、多天预报；失败或空配置时本项目回退小渡天气
+# 获取地址：https://www.apihz.cn  → 注册 → 个人中心 → id/通讯密钥
+APIHZ_TQ_ID = ""
+APIHZ_TQ_KEY = ""
 
 # 小小API 配置（今日运势 / 星座运势）
 # 注册地址：https://xxapi.cn  → 控制台 → 密钥管理
 # 免费接口也支持无 Key 调用；填写 Key 可提高稳定性与额度
-XXAPI_KEY = "1fb99f34b2481d8d"
+# 获取地址：https://xxapi.cn  → 注册 → 控制台 → 密钥
+XXAPI_KEY = ""
 
 # 小小API - 随机4K图片（random4kPic，type=acg=二次元 / wallpaper=风景）
 RANDOMPIC_API_URL = "https://v2.xxapi.cn/api/random4kPic"

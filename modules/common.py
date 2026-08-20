@@ -111,7 +111,7 @@ def is_channel_chat(chat_id: str) -> bool:
 
 # 消息去重缓存
 _dedup_cache: dict = {}
-_DEDUP_TTL = 10  # 秒
+_DEDUP_TTL = 3  # 秒（原 10 秒太长，会误吞用户连续触发的指令；3 秒足够防 QQ 抖动/重连重发）
 
 # msg_id 去重缓存（更准确，QQ 同一条消息重发场景）
 _msg_id_cache: dict = {}
@@ -1504,14 +1504,14 @@ async def _send_audio_segments(api, target_id: str, audio_url: str, msg_id: str 
         return None
     logger.info("音频下载成功: %d bytes (%.1f KB)" % (len(audio_bytes), len(audio_bytes) / 1024))
 
-    # 整首转 MP3（不截断）
-    mp3_bytes = _convert_to_mp3(audio_bytes)
+    # 整首转 MP3（不截断）—— ffmpeg 转码是同步 CPU/IO 密集型操作，放到线程池避免阻塞事件循环
+    mp3_bytes = await asyncio.to_thread(_convert_to_mp3, audio_bytes)
     if not mp3_bytes:
         logger.error("音频转换MP3失败，尝试直接分段原始音频")
         mp3_bytes = audio_bytes
 
-    # 分段
-    segs = _split_audio_to_segments(mp3_bytes)
+    # 分段——同样放到线程池
+    segs = await asyncio.to_thread(_split_audio_to_segments, mp3_bytes)
     if not segs:
         logger.warning("分段失败，回退为整首单条发送（长歌可能超限失败）")
         segs = [mp3_bytes]
@@ -2054,7 +2054,7 @@ async def _send_audio_whole(api, target_id: str, audio_url: str, msg_id: str = N
         logger.error("下载音频失败，无法发送整条语音: %s" % audio_url[:80])
         return False
 
-    mp3_bytes = _convert_to_mp3(audio_bytes)
+    mp3_bytes = await asyncio.to_thread(_convert_to_mp3, audio_bytes)
     if not mp3_bytes:
         logger.error("音频转换 MP3 失败，无法发送整条语音")
         return False
@@ -2065,7 +2065,7 @@ async def _send_audio_whole(api, target_id: str, audio_url: str, msg_id: str = N
         # 先用低码率（64k 单声道 ≈ 2.4MB/5min）把整首压到 < 4MB 重试一次。
         mb = len(mp3_bytes) / 1024 / 1024
         logger.warning("整条语音上传失败(%.1fMB)，尝试低码率整条重试" % mb)
-        low_bytes = _convert_to_mp3(audio_bytes, force=("64k", 1, 22050))
+        low_bytes = await asyncio.to_thread(_convert_to_mp3, audio_bytes, ("64k", 1, 22050))
         if low_bytes:
             file_info = await upload_fn(api, target_id, 3, low_bytes)
         if not file_info:

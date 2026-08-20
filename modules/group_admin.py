@@ -837,6 +837,10 @@ class GroupAdminManager:
         " - 祝您在本群玩的开心"
     )  # 入群欢迎词为空时的兜底文案（参考 QQ 模板卡片默认布局）
 
+    # 去重：同一群+同一成员 5 秒内只发一次。防 WS 重连回放 / 多实例残留进程重复触发。
+    _welcome_sent_recently = {}  # {(group_openid, member_openid): expire_ts(float, time.time()+5)}
+    _WELCOME_DEDUPE_WINDOW = 5.0
+
     async def _send_welcome_menu(self, api, group_openid: str, msg_id: str):
         """入群通知主菜单（二级按钮）。"""
         try:
@@ -862,6 +866,25 @@ class GroupAdminManager:
         充阳 @昵称的方式：msg_type=2 原生 mark（蓝色可点击 @提及）。
         """
         try:
+            # ---- 去重闸门：同群+同成员 5s 内只发一次 ----
+            # 防止 WS 重连回放事件 / 多残留 bot 进程 / 用户多次点击入群按钮 等导致重复欢迎
+            import time
+            try:
+                _now = time.time()
+                # 顺手清理过期键（最多保留 64 条防内存膨胀）
+                if len(self._welcome_sent_recently) > 64:
+                    self._welcome_sent_recently = {
+                        k: v for k, v in self._welcome_sent_recently.items() if v > _now
+                    }
+                _key = (group_openid or "", member_openid or "")
+                _exp = self._welcome_sent_recently.get(_key, 0.0)
+                if _exp > _now:
+                    logger.info("[入群通知] 去重跳过: 群=%s 成员=%s (剩余 %.1fs)" % (
+                        group_openid, (member_openid or "")[:8], _exp - _now))
+                    return
+                self._welcome_sent_recently[_key] = _now + self._WELCOME_DEDUPE_WINDOW
+            except Exception:
+                pass
             from console_server import get_welcome_group_config
             cfg = get_welcome_group_config(group_openid)
             if not cfg.get("welcome_enabled"):
@@ -888,7 +911,10 @@ class GroupAdminManager:
                 except Exception:
                     pass
             if not raw_name and member_openid:
+                # 最后兜底：openid 前 8 位。日志里明确标记，避免误以为是真实昵称
                 raw_name = member_openid[:8]
+                logger.warning("[入群通知] 昵称解析全失败，回退 openid 前 8 位: 群=%s 成员=%s" % (
+                    group_openid, member_openid))
             if not raw_name:
                 raw_name = "新同学"
             # caption 用字面 @昵称（msg_type=7 content 不解析 <@!openid>）

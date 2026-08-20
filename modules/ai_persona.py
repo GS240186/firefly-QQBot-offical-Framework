@@ -23,7 +23,10 @@ _SHARED = "_shared"
 # 每机器人内存缓存：appid -> {"personas":[], "persona_seq":0, "bases":[], "base_seq":0, "item_seq":0}
 _state_by_bot = {}
 
-_lock = threading.Lock()
+# RLock（可重入）：delete_*/set_active_*/update_knowledge_item 等在 `with _lock` 内部会调用
+# _save_xxx，而 _save_xxx 内部又通过 _get_state 再次 `with _lock`。若用普通 Lock 会因同一线程
+# 重入而自死锁，表现为 /api/ai/persona、/api/ai/knowledge 的删除/切换操作长时间无响应。
+_lock = threading.RLock()
 _file_lock = threading.Lock()
 
 

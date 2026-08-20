@@ -160,7 +160,7 @@ def set_enabled(appid, enabled):
 
 
 def mask_appid(appid):
-    """脱敏展示：YOUR_APPID -> 10****41。"""
+    """脱敏展示：102779741 -> 10****41。"""
     appid = str(appid or "")
     if len(appid) <= 4:
         return appid

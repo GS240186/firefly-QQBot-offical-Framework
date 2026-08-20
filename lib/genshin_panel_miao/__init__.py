@@ -32,10 +32,20 @@ _RENDER_DST = os.path.join(_YZ_DIR, "render.mjs")
 
 def _sync_render_mjs():
     """启动同步: 把项目内的 render.mjs 复制到 Yunzai 目录 (供 node 用).
-    任何失败都 print 到 stderr 让 bot 控制台可见."""
+
+    该原神/星铁面板功能依赖本机 Yunzai + miao-plugin 资源，属可选功能；
+    当源文件或 Yunzai 目录缺失时静默跳过（仅打印一次调试提示），
+    不再以 stderr error 形式刷屏，避免干扰主流程。
+    """
+    if not os.path.isfile(_RENDER_SRC):
+        # 源脚本缺失：本机未部署 miao_panel，该功能本就不可用，静默跳过
+        print("[lib.genshin_panel_miao] render.mjs 源缺失，面板渲染功能不可用（可选功能，已跳过）", flush=True)
+        return
     try:
-        if not os.path.isfile(_RENDER_SRC):
-            print("[lib.genshin_panel_miao] 源文件不存在: %s" % _RENDER_SRC, file=sys.stderr, flush=True)
+        dst_dir = os.path.dirname(_RENDER_DST)
+        if not os.path.isdir(dst_dir):
+            # 目标 Yunzai 目录不存在，同样静默跳过
+            print("[lib.genshin_panel_miao] Yunzai 目录不存在，面板渲染功能不可用（可选功能，已跳过）", flush=True)
             return
         src_mtime = os.path.getmtime(_RENDER_SRC)
         if os.path.isfile(_RENDER_DST):
@@ -44,10 +54,10 @@ def _sync_render_mjs():
                 return  # 已是最新
         # 拷贝 (覆盖)
         shutil.copyfile(_RENDER_SRC, _RENDER_DST)
-        print("[lib.genshin_panel_miao] render.mjs 已同步 -> %s" % _RENDER_DST, file=sys.stderr, flush=True)
+        print("[lib.genshin_panel_miao] render.mjs 已同步 -> %s" % _RENDER_DST, flush=True)
     except Exception as e:
         print("[lib.genshin_panel_miao] 同步失败: %s: %s (src=%s dst=%s)" % (
-            type(e).__name__, e, _RENDER_SRC, _RENDER_DST), file=sys.stderr, flush=True)
+            type(e).__name__, e, _RENDER_SRC, _RENDER_DST), flush=True)
 
 
 _sync_render_mjs()
