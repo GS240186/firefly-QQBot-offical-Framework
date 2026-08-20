@@ -2,8 +2,6 @@
 
 """console_server 兼容桩（stub）。
 
-
-
 历史原因：bot.py 早期版本依赖 console_server.py 提供业务工具函数
 
 （_restart_bot、_shutdown_bot、_get_status_data、record_message、
@@ -12,13 +10,9 @@ is_feature_enabled、bind_*_qq_number 等）。原 console_server.py 与
 
 Web 控制台服务（端口 9988、xiaoliu-console/）现已删除。
 
-
-
 为保证 bot.py 能继续以 `python bot.py` 启动，本文件仅提供与
 
 bot.py import 列表一致的函数符号。这些函数：
-
-
 
 - 不再启动任何 HTTP / Web 服务（旧 9988 控制台已下线）
 
@@ -28,15 +22,11 @@ bot.py import 列表一致的函数符号。这些函数：
 
   (例如 is_feature_enabled) 不会因为 False 而关闭原有功能
 
-
-
 如果将来要恢复完整控制台，请重写本文件或将 bot.py 改造为
 
 直接 import 业务模块（modules.*）。
 
 """
-
-
 
 import os
 
@@ -45,6 +35,8 @@ import sys
 import time
 
 import logging
+
+logger = logging.getLogger("console_server")
 
 import threading
 
@@ -71,11 +63,11 @@ from datetime import datetime
 import modules.bot_manager as bot_manager
 import modules.bot_health as bot_health
 import modules.plugin_registry as plugin_registry
+import modules.plugin_center as plugin_center
+import modules.feature_menu as feature_menu
 
 # 数据根目录（尽早定义，供导入期调用的 per-bot 加载函数使用）
 _DATA_ROOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-
-
 
 __all__ = [
 
@@ -141,10 +133,6 @@ __all__ = [
 
 ]
 
-
-
-
-
 _lock = threading.RLock()
 
 _started_at = time.time()
@@ -179,9 +167,11 @@ _features = {
 
     "image_yscos": True, "image_ys": True, "image_meinvpic": True, "image_random": True,
 
-    "game_qiuqian": True, "game_daanzi": True, "game_tarot": True, "game_horoscope": True, "tool_disease": True, "tool_waste": True,"game_horoscope": True, "tool_disease": True, "tool_waste": True,
+    "game_qiuqian": True, "game_daanzi": True, "game_tarot": True, "game_horoscope": True,
+    "tool_disease": True, "tool_waste": True, "tool_navigation": True, "tool_tourism": True,
 
     "ai": True,
+    "study_quiz": True, "study_driving": True, "study_math": True, "study_poetry": True,
 
 }
 
@@ -201,8 +191,6 @@ _QQ_BINDINGS_FILE = os.path.join(
 
 )
 
-
-
 # 群资料持久化：群名（可手动修改）、头像（根据绑定的 QQ 群号自动生成）
 
 _GROUP_PROFILES_FILE = os.path.join(
@@ -212,8 +200,6 @@ _GROUP_PROFILES_FILE = os.path.join(
 )
 
 _group_profiles = {}
-
-
 
 # 今日统计持久化：避免 bot 重启 / 关机后「今日进群 / 退群 / 加好友 / 删好友 / 单聊群聊消息」计数清零。
 
@@ -251,9 +237,81 @@ _TODAY_KEYS = (
 # 按机器人维度统计今日计数（与全局 _status 平行），用于仪表盘「按机器人切换查看」
 _status_by_bot = {}
 
+# ============ 原子写 + 损坏自恢复（修复重启后数据偶然消失） ============
+# 根因：早期部分 _save_* 用 open(path,"w") + json.dump 直接覆盖，进程在重启 / 关机
+# （os._exit 硬退出）打断的瞬间会留下「截断 / 损坏」的文件；下一次启动时 _load_*
+# 解析失败返回空 -> 成员 / 单聊 / 群聊 / 管理员名单「凭空消失」。
+# 修复：所有数据保存改为 写 .tmp -> fsync -> os.replace 原子替换；落盘前把当前
+# 有效文件备份为 .bak；加载时若主文件损坏则自动从 .bak 恢复。
+
+def _atomic_save_json(path, data, indent=None):
+    """原子写 JSON：写临时文件 -> fsync -> 原子替换；替换前备份当前有效版本为 .bak。
+
+    即使在 replace 瞬间被 os._exit 打断，磁盘上的正式文件也始终是「完整旧版」或
+    「完整新版」，不会出现半截文件；极端情况下还能从 .bak 找回上一份好数据。
+    """
+    _d = os.path.dirname(path)
+    try:
+        if not os.path.isdir(_d):
+            os.makedirs(_d, exist_ok=True)
+    except Exception:
+        pass
+    # 备份当前有效文件（仅当存在且非空）
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            import shutil
+            shutil.copyfile(path, path + ".bak")
+    except Exception:
+        pass
+    _tmp = path + ".tmp"
+    try:
+        _payload = _json.dumps(data, ensure_ascii=False, indent=indent)
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            _f.write(_payload)
+            _f.flush()
+            try:
+                os.fsync(_f.fileno())
+            except OSError:
+                pass
+        os.replace(_tmp, path)
+        return True
+    except Exception as _e:
+        print("[console_server] 原子写失败 %s: %s" % (path, _e), flush=True)
+        try:
+            if os.path.isfile(_tmp):
+                os.remove(_tmp)
+        except Exception:
+            pass
+        return False
 
 
+def _load_json_safe(path, default=None):
+    """读取 JSON；主文件损坏 / 为空时自动尝试 .bak 备份恢复。都失败返回 default。"""
+    for _p in (path, path + ".bak"):
+        try:
+            if os.path.isfile(_p) and os.path.getsize(_p) > 0:
+                with open(_p, "r", encoding="utf-8") as _f:
+                    return _json.load(_f)
+        except Exception:
+            continue
+    return default if default is not None else {}
 
+
+def _flush_all_data():
+    """重启 / 关机前尽量把内存态数据落盘，避免 os._exit 硬退出时丢数据。"""
+    for _fn in (_save_qq_bindings, lambda: _save_admin_list(_load_admin_list()),
+                _save_group_info_cache, _save_members, _save_group_profiles,
+                _save_group_names, _save_today_stats):
+        try:
+            _fn()
+        except Exception:
+            pass
+    try:
+        _BotMap._dirty = True
+        _BotMap._last_flush = 0.0
+        _BotMap._maybe_flush()
+    except Exception:
+        pass
 
 
 def _save_qq_bindings():
@@ -278,29 +336,19 @@ def _save_qq_bindings():
 
             }
 
-        with open(_QQ_BINDINGS_FILE, "w", encoding="utf-8") as f:
-
-            _json.dump(payload, f, ensure_ascii=False)
+        _atomic_save_json(_QQ_BINDINGS_FILE, payload)
 
     except Exception as e:
 
         print("[console_server] 保存QQ绑定失败: %s" % e, flush=True)
 
-
-
-
-
 def _load_qq_bindings():
 
     try:
 
-        if not os.path.isfile(_QQ_BINDINGS_FILE):
-
+        data = _load_json_safe(_QQ_BINDINGS_FILE)
+        if not isinstance(data, dict):
             return
-
-        with open(_QQ_BINDINGS_FILE, "r", encoding="utf-8") as f:
-
-            data = _json.load(f)
 
         with _lock:
 
@@ -330,15 +378,7 @@ def _load_qq_bindings():
 
         print("[console_server] 加载QQ绑定失败: %s" % e, flush=True)
 
-
-
-
-
 _load_qq_bindings()
-
-
-
-
 
 def _load_group_profiles():
 
@@ -400,10 +440,6 @@ def _load_group_profiles():
 
         print("[console_server] 加载群资料失败: %s" % e, flush=True)
 
-
-
-
-
 def _save_group_profiles():
 
     """按机器人分桶把群资料写入 data/bots/<appid>/group_profiles.json。"""
@@ -427,32 +463,17 @@ def _save_group_profiles():
             for _bk, _items in _buckets.items():
 
                 _f = _bot_file(_bk, "group_profiles.json")
-
-                _tmp = _f + ".tmp"
-
-                with open(_tmp, "w", encoding="utf-8") as _fh:
-
-                    _json.dump({"profiles": _items}, _fh, ensure_ascii=False, indent=2)
-
-                os.replace(_tmp, _f)
+                _atomic_save_json(_f, {"profiles": _items}, indent=2)
 
     except Exception as e:
 
         print("[console_server] 保存群资料失败: %s" % e, flush=True)
 
-
-
-
-
 _load_group_profiles()
-
-
 
 _group_names = {}
 
 _user_avatars = {}
-
-
 
 # 「有发言记录的群聊」集合持久化文件（openid 维度，跨重启 / 关机保留）
 
@@ -461,10 +482,6 @@ _GROUP_NAMES_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "group_names.json"
 
 )
-
-
-
-
 
 def _load_group_names():
 
@@ -530,10 +547,6 @@ def _load_group_names():
 
         print("[console_server] 加载群发言记录失败（忽略）: %s" % e, flush=True)
 
-
-
-
-
 def _save_group_names():
 
     """按机器人分桶原子落盘「有发言记录的群聊」集合。"""
@@ -557,22 +570,11 @@ def _save_group_names():
             for _bk, _items in _buckets.items():
 
                 _f = _bot_file(_bk, "group_names.json")
-
-                _tmp = _f + ".tmp"
-
-                with open(_tmp, "w", encoding="utf-8") as _fh:
-
-                    _json.dump(_items, _fh, ensure_ascii=False, indent=2)
-
-                os.replace(_tmp, _f)
+                _atomic_save_json(_f, _items, indent=2)
 
     except Exception as e:
 
         print("[console_server] 保存群发言记录失败（忽略）: %s" % e, flush=True)
-
-
-
-
 
 def _note_group_message(group_openid, nickname=""):
 
@@ -616,15 +618,7 @@ def _note_group_message(group_openid, nickname=""):
 
     return is_new
 
-
-
-
-
 _load_group_names()
-
-
-
-
 
 # ====== 成员归集（用于「成员管理」页） ======
 
@@ -688,9 +682,7 @@ class _BotMap(dict):
         cls._dirty = False
         try:
             _p = os.path.join(_DATA_ROOT_DIR, "group_bot_map.json")
-            with open(_p + ".tmp", "w", encoding="utf-8") as _f:
-                _json.dump({"groups": dict(GROUP_BOT_MAP), "users": dict(USER_BOT_MAP)}, _f, ensure_ascii=False)
-            os.replace(_p + ".tmp", _p)
+            _atomic_save_json(_p, {"groups": dict(GROUP_BOT_MAP), "users": dict(USER_BOT_MAP)})
         except Exception:
             cls._dirty = True
 
@@ -708,8 +700,6 @@ def _load_group_bot_map():
 
 _members = {}
 
-
-
 # ====== OIAPI Openid 反查昵称缓存（免鉴权官方渠道） ======
 
 # 用于填 _upsert_member 时 author.username 为空 / 用户未绑 QQ 时无法反查昵称的洞。
@@ -726,10 +716,6 @@ _MEMBERS_FILE = os.path.join(
 
 )
 
-
-
-
-
 def _member_to_json(m):
 
     out = dict(m)
@@ -737,10 +723,6 @@ def _member_to_json(m):
     out["sources"] = list(m.get("sources") or [])
 
     return out
-
-
-
-
 
 def _save_members():
 
@@ -765,22 +747,11 @@ def _save_members():
                 _payload = {"seq": _members_seq, "members": {_kk: _member_to_json(_vv) for _kk, _vv in _items.items()}}
 
                 _f = _bot_file(_bk, "members.json")
-
-                _tmp = _f + ".tmp"
-
-                with open(_tmp, "w", encoding="utf-8") as _fh:
-
-                    _json.dump(_payload, _fh, ensure_ascii=False)
-
-                os.replace(_tmp, _f)
+                _atomic_save_json(_f, _payload)
 
     except Exception as e:
 
         print("[console_server] 保存成员失败: %s" % e, flush=True)
-
-
-
-
 
 def _load_members():
 
@@ -812,9 +783,9 @@ def _merge_members_file(_fp):
 
     try:
 
-        with open(_fp, "r", encoding="utf-8") as f:
-
-            data = _json.load(f)
+        data = _load_json_safe(_fp)
+        if not isinstance(data, dict):
+            return 0
 
         with _lock:
 
@@ -834,15 +805,7 @@ def _merge_members_file(_fp):
 
         return 0
 
-
-
-
-
 _load_members()
-
-
-
-
 
 # ============================================================
 
@@ -854,17 +817,11 @@ _FEATURE_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 
 _QA_RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "qa_rules.json")
 
-
-
 _feature_configs = {}
 
 _qa_rules = []
 
 _qa_rules_seq = 0
-
-
-
-
 
 def _load_feature_configs():
 
@@ -887,10 +844,6 @@ def _load_feature_configs():
         print("[console_server] 加载功能配置失败: %s" % e, flush=True)
 
         _feature_configs = {}
-
-
-
-
 
 def _save_feature_configs():
 
@@ -921,13 +874,144 @@ RUNTIME_SETTINGS_SCHEMA = {
     "media.storage.ttl_days": {"type": "int", "default": 7, "label": "媒体留存天数", "desc": "缓存媒体超过该天数将被清理（0 表示不限制）"},
     "media.storage.max_bytes": {"type": "int", "default": 104857600, "label": "媒体缓存上限(字节)", "desc": "缓存总大小超过此值时按最旧优先清理（0 表示不限制）"},
     "plugin.market.repo_url": {"type": "string", "default": "", "label": "插件市场仓库地址", "desc": "填仓库地址即可（github.com 或 raw.githubusercontent.com 均可；缺失分支自动补 main）。如 https://github.com/OWNER/REPO。留空使用默认仓库；保存后即时生效，无需重启。index.json 可放在根目录或「插件市场」子目录，bot 会自动依次尝试两个位置。"},
-    "feedback.form_url": {"type": "string", "default": "https://docs.qq.com/form/page/DWXNyWGJiZE9rZHFD", "label": "问题反馈表单链接", "desc": "用户点击「反馈」按钮后跳转的收集表链接，可在控制台功能配置中修改并即时热加载生效，无需重启。"},
-    "feedback.enabled": {"type": "bool", "default": True, "label": "启用问题反馈入口", "desc": "关闭后，菜单中的「反馈」按钮将不再显示，机器人也不再响应反馈相关关键词。"},
+    "feedback.form_url": {"type": "string", "default": "", "label": "问题反馈表单链接", "desc": "用户点击「反馈」按钮后跳转的收集表链接，可在控制台功能配置中修改并即时热加载生效，无需重启。⚠️ 开源部署请填你自己的腾讯问卷/Google Forms 链接，留空则按钮不显示。"},
+    "feedback.enabled": {"type": "bool", "default": False, "label": "启用问题反馈入口", "desc": "关闭后，菜单中的「反馈」按钮将不再显示，机器人也不再响应反馈相关关键词。⚠️ 开启前请先在「问题反馈表单链接」里填好你的收集表链接。"},
     "experience_group.enabled": {"type": "bool", "default": True, "label": "启用体验群入口", "desc": "关闭后，菜单中的「加入体验群」按钮将不再显示，机器人也不再响应加群相关关键词。"},
-    "experience_group.url": {"type": "string", "default": "https://qun.qq.com/universal-share/share?ac=1&authKey=IbuIYkqGAHmhrPxq3dAcsJ76ay4JxTSTsWDCBq6ZzpVq8T%2F8a30R2ZB11aQru%2B6C&busi_data=eyJncm91cENvZGUiOiI3MjkyMjQ5MzYiLCJ0b2tlbiI6ImowUFJxRjg2TnMrRzJ2bjZBTXJNa2xDQnl0T3lLNEQ3TmM1bnRnS0xFUGRLTlo1OG40S3ZweFZOdnNHd2krbm0iLCJ1aW4iOiIzMTM4MTU4MTE2In0%3D&data=65ylcQMPQN-LAuRaU0wUXbI7iCkPgEr0GJP4WooqBrhcGCwunHFvqok-q8tCkyY7LL0XFZhv2XLnImCCxPwKFw&svctype=4&tempid=h5_group_info", "label": "体验群加入链接", "desc": "用户点击「加入体验群」按钮后跳转的加群分享链接，可在控制台功能配置中修改并即时热加载生效，无需重启。"},
+    "experience_group.url": {"type": "string", "default": "", "label": "体验群加入链接", "desc": "用户点击「加入体验群」按钮后跳转的加群分享链接，可在控制台功能配置中修改并即时热加载生效，无需重启。⚠️ 此链接会暴露真实群号与邀请人 openid，开源部署请留空或填你自己的链接。"},
 }
 
 _runtime_settings = {"global": {}, "bots": {}, "groups": {}}
+
+
+# ============================================================
+# 管理台品牌信息（侧边栏 logo + 标题）
+# 独立于 runtime_settings，因为 logo 通常是 base64 图片、比较大
+# 存放在 data/admin_brand.json
+# ============================================================
+_ADMIN_BRAND_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "admin_brand.json"
+)
+_admin_brand_cache = None
+_admin_brand_mtime = 0.0
+_admin_brand_lock = threading.Lock()
+
+
+def _load_admin_brand() -> dict:
+    """读取 data/admin_brand.json；带 mtime 缓存。"""
+    global _admin_brand_cache, _admin_brand_mtime
+    with _admin_brand_lock:
+        try:
+            _mt = os.path.getmtime(_ADMIN_BRAND_FILE) if os.path.exists(_ADMIN_BRAND_FILE) else 0.0
+            if _admin_brand_cache is not None and abs(_mt - _admin_brand_mtime) < 0.001:
+                return _admin_brand_cache
+            if not os.path.exists(_ADMIN_BRAND_FILE):
+                _admin_brand_cache = {"title": "小流萤管理后台", "logo": ""}
+                _admin_brand_mtime = 0.0
+                return _admin_brand_cache
+            with open(_ADMIN_BRAND_FILE, "r", encoding="utf-8") as _f:
+                _data = _json.load(_f) or {}
+            _admin_brand_cache = {
+                "title": str(_data.get("title") or "小流萤管理后台"),
+                "logo": str(_data.get("logo") or ""),
+                "logo_updated_at": int(_data.get("logo_updated_at") or 0),
+            }
+            _admin_brand_mtime = _mt
+            return _admin_brand_cache
+        except Exception:
+            return {"title": "小流萤管理后台", "logo": ""}
+
+
+def _save_admin_brand(brand: dict, reset: bool = False) -> tuple:
+    """保存 data/admin_brand.json。reset=True 时清空。"""
+    global _admin_brand_cache, _admin_brand_mtime
+    with _admin_brand_lock:
+        try:
+            os.makedirs(os.path.dirname(_ADMIN_BRAND_FILE), exist_ok=True)
+            if reset:
+                _data = {"title": "小流萤管理后台", "logo": ""}
+            else:
+                _data = {
+                    "title": str(brand.get("title") or "小流萤管理后台"),
+                    "logo": str(brand.get("logo") or ""),
+                    "logo_updated_at": int(__import__("time").time()),
+                }
+            # 原子写：先写临时文件再 rename
+            _tmp = _ADMIN_BRAND_FILE + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                _json.dump(_data, _f, ensure_ascii=False)
+            os.replace(_tmp, _ADMIN_BRAND_FILE)
+            _admin_brand_cache = _data
+            _admin_brand_mtime = os.path.getmtime(_ADMIN_BRAND_FILE)
+            return (True, None)
+        except Exception as _e:
+            return (False, str(_e))
+
+
+# ============================================================
+# 流萤FM 音乐面板自定义（标题/副标题/唱片封面）
+# ============================================================
+_MUSIC_FM_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "music_fm.json"
+)
+_music_fm_cache = None
+_music_fm_mtime = 0.0
+_music_fm_lock = threading.Lock()
+
+_MUSIC_FM_DEFAULTS = {
+    "title": "流萤FM",
+    "subtitle": "与流萤一起走在路上",
+    "cover": "/admin/assets/music/cover.png",
+}
+
+
+def _load_music_fm() -> dict:
+    """读取 data/music_fm.json；带 mtime 缓存。"""
+    global _music_fm_cache, _music_fm_mtime
+    with _music_fm_lock:
+        try:
+            _mt = os.path.getmtime(_MUSIC_FM_FILE) if os.path.exists(_MUSIC_FM_FILE) else 0.0
+            if _music_fm_cache is not None and abs(_mt - _music_fm_mtime) < 0.001:
+                return _music_fm_cache
+            if not os.path.exists(_MUSIC_FM_FILE):
+                _music_fm_cache = dict(_MUSIC_FM_DEFAULTS)
+                _music_fm_mtime = 0.0
+                return _music_fm_cache
+            with open(_MUSIC_FM_FILE, "r", encoding="utf-8") as _f:
+                _data = _json.load(_f) or {}
+            _music_fm_cache = {
+                "title": str(_data.get("title") or _MUSIC_FM_DEFAULTS["title"]),
+                "subtitle": str(_data.get("subtitle") or _MUSIC_FM_DEFAULTS["subtitle"]),
+                "cover": str(_data.get("cover") or _MUSIC_FM_DEFAULTS["cover"]),
+            }
+            _music_fm_mtime = _mt
+            return _music_fm_cache
+        except Exception:
+            return dict(_MUSIC_FM_DEFAULTS)
+
+
+def _save_music_fm(fm: dict, reset: bool = False) -> tuple:
+    """保存 data/music_fm.json。reset=True 时清空为默认。"""
+    global _music_fm_cache, _music_fm_mtime
+    with _music_fm_lock:
+        try:
+            os.makedirs(os.path.dirname(_MUSIC_FM_FILE), exist_ok=True)
+            if reset:
+                _data = dict(_MUSIC_FM_DEFAULTS)
+            else:
+                _data = {
+                    "title": str(fm.get("title") or _MUSIC_FM_DEFAULTS["title"]),
+                    "subtitle": str(fm.get("subtitle") or _MUSIC_FM_DEFAULTS["subtitle"]),
+                    "cover": str(fm.get("cover") or _MUSIC_FM_DEFAULTS["cover"]),
+                }
+            _tmp = _MUSIC_FM_FILE + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                _json.dump(_data, _f, ensure_ascii=False)
+            os.replace(_tmp, _MUSIC_FM_FILE)
+            _music_fm_cache = _data
+            _music_fm_mtime = os.path.getmtime(_MUSIC_FM_FILE)
+            return (True, None)
+        except Exception as _e:
+            return (False, str(_e))
 
 
 def _load_runtime_settings():
@@ -1165,11 +1249,6 @@ def _enforce_runtime_media_storage():
         print("[cache-clean] 运行设置媒体存储限制失败: %s" % e, flush=True)
         return 0, 0
 
-
-
-
-
-
 def _load_qa_rules():
 
     global _qa_rules, _qa_rules_seq
@@ -1220,10 +1299,6 @@ def _load_qa_rules():
 
         _qa_rules_seq = 0
 
-
-
-
-
 def _save_qa_rules():
 
     try:
@@ -1258,10 +1333,6 @@ def _save_qa_rules():
 
         print("[console_server] 保存问答规则失败: %s" % e, flush=True)
 
-
-
-
-
 # ============================================================
 
 # 系统功能开关配置持久化
@@ -1277,8 +1348,6 @@ _system_switches = {}
 # 再回退 _features，最后默认开启。空 dict 表示该机器人完全跟随全局。
 _bot_system_switches = {}
 
-
-
 # 视频限制配置：parse=视频解析（抖音/B站无水印），system=视频系统（B站搜索/排行榜）
 
 # max_duration: 最大时长（秒），0=不限制；max_mb: 最大大小（MB），0=不限制
@@ -1292,10 +1361,6 @@ _VIDEO_LIMITS_DEFAULT = {
 }
 
 _video_limits = {}
-
-
-
-
 
 # ============================================================
 
@@ -1431,8 +1496,6 @@ _CACHE_CATEGORIES = {
 
 }
 
-
-
 # 定时清理默认配置
 
 _CACHE_CLEAN_DEFAULT = {
@@ -1459,8 +1522,6 @@ _CACHE_CLEAN_DEFAULT = {
 
 _cache_clean_config = {}
 
-
-
 # 整点报时（自动）默认配置（按群独立）
 
 _CHIME_DEFAULT = {
@@ -1479,8 +1540,6 @@ _CHIME_DEFAULT = {
 
 _chime_groups = {}   # {group_openid: dict(同上)，每个群的设置相互独立}
 
-
-
 # 签到积分规则（可在后台「功能配置 → 签到规则」页配置，无需改代码）
 
 _CHECKIN_DEFAULT = {
@@ -1493,13 +1552,11 @@ _CHECKIN_DEFAULT = {
 
     "lottery_cost": 50,    # 积分抽奖每次消耗积分
 
+    "lottery_daily_limit": 2,  # 每日抽奖次数上限（0 = 不限制）
+
 }
 
 _checkin_config = dict(_CHECKIN_DEFAULT)
-
-
-
-
 
 def _default_cache_clean():
 
@@ -1507,19 +1564,11 @@ def _default_cache_clean():
 
     return _copy.deepcopy(_CACHE_CLEAN_DEFAULT)
 
-
-
-
-
 def _default_chime_group():
 
     import copy as _copy
 
     return _copy.deepcopy(_CHIME_DEFAULT)
-
-
-
-
 
 def get_chime_group_config(group_openid):
 
@@ -1543,10 +1592,6 @@ def get_chime_group_config(group_openid):
 
     return out
 
-
-
-
-
 def get_checkin_config():
 
     """返回签到积分规则配置（含默认值与数值校验），供 checkin.py 运行时读取。"""
@@ -1563,6 +1608,8 @@ def get_checkin_config():
 
     cost = max(1, _coerce_int(src.get("lottery_cost", _CHECKIN_DEFAULT["lottery_cost"]), _CHECKIN_DEFAULT["lottery_cost"]))
 
+    limit = max(0, _coerce_int(src.get("lottery_daily_limit", _CHECKIN_DEFAULT["lottery_daily_limit"]), _CHECKIN_DEFAULT["lottery_daily_limit"]))
+
     return {
 
         "base_points": base,
@@ -1573,11 +1620,9 @@ def get_checkin_config():
 
         "lottery_cost": cost,
 
+        "lottery_daily_limit": limit,
+
     }
-
-
-
-
 
 def set_checkin_config(payload):
 
@@ -1609,15 +1654,15 @@ def set_checkin_config(payload):
 
             cfg["lottery_cost"] = max(1, _coerce_int(payload.get("lottery_cost"), cfg.get("lottery_cost", _CHECKIN_DEFAULT["lottery_cost"])))
 
+        if payload.get("lottery_daily_limit") is not None:
+
+            cfg["lottery_daily_limit"] = max(0, _coerce_int(payload.get("lottery_daily_limit"), cfg.get("lottery_daily_limit", _CHECKIN_DEFAULT["lottery_daily_limit"])))
+
         _checkin_config = cfg
 
     _save_system_config()
 
     return get_checkin_config()
-
-
-
-
 
 def set_chime_group_enabled(group_openid, enabled):
 
@@ -1647,10 +1692,6 @@ def set_chime_group_enabled(group_openid, enabled):
 
     return get_chime_group_config(group_openid)
 
-
-
-
-
 def set_chime_group_interval(group_openid, hours):
 
     """设置指定群报时间隔（小时，1-24）；返回最新配置。"""
@@ -1672,10 +1713,6 @@ def set_chime_group_interval(group_openid, hours):
     _save_system_config()
 
     return get_chime_group_config(group_openid)
-
-
-
-
 
 def set_chime_group_period(group_openid, start, end):
 
@@ -1707,10 +1744,6 @@ def set_chime_group_period(group_openid, start, end):
 
     return get_chime_group_config(group_openid)
 
-
-
-
-
 # 入群通知（按群独立）
 
 _WELCOME_DEFAULT = {
@@ -1723,19 +1756,11 @@ _WELCOME_DEFAULT = {
 
 _welcome_groups = {}   # {group_openid: dict(同上)，每个群的设置相互独立}
 
-
-
-
-
 def _default_welcome_group():
 
     import copy as _copy
 
     return _copy.deepcopy(_WELCOME_DEFAULT)
-
-
-
-
 
 def get_welcome_group_config(group_openid):
 
@@ -1756,10 +1781,6 @@ def get_welcome_group_config(group_openid):
         out["welcome_msg"] = ""
 
     return out
-
-
-
-
 
 def set_welcome_group_config(group_openid, **fields):
 
@@ -1795,10 +1816,6 @@ def set_welcome_group_config(group_openid, **fields):
 
     return get_welcome_group_config(group_openid)
 
-
-
-
-
 def _days_in_month(y, m):
 
     from datetime import datetime
@@ -1812,10 +1829,6 @@ def _days_in_month(y, m):
         nxt = datetime(y, m + 1, 1)
 
     return (nxt - datetime(y, m, 1)).days
-
-
-
-
 
 def _planned_time_for_date(cfg, date):
 
@@ -1854,10 +1867,6 @@ def _planned_time_for_date(cfg, date):
             return None
 
     return datetime(date.year, date.month, date.day, hour, minute)
-
-
-
-
 
 def _next_trigger_after(cfg, now):
 
@@ -1903,10 +1912,6 @@ def _next_trigger_after(cfg, now):
 
     return _planned_time_for_date(cfg, nxt)
 
-
-
-
-
 def _coerce_int(v, default=0):
 
     try:
@@ -1917,19 +1922,11 @@ def _coerce_int(v, default=0):
 
         return default
 
-
-
-
-
 def _default_video_limits():
 
     import copy as _copy
 
     return _copy.deepcopy(_VIDEO_LIMITS_DEFAULT)
-
-
-
-
 
 # ============================================================
 
@@ -1939,13 +1936,7 @@ def _default_video_limits():
 
 import fnmatch as _fnmatch
 
-
-
 _PROJECT_ROOT_FOR_CACHE = None
-
-
-
-
 
 def _project_root():
 
@@ -1956,10 +1947,6 @@ def _project_root():
         _PROJECT_ROOT_FOR_CACHE = os.path.dirname(os.path.abspath(__file__))
 
     return _PROJECT_ROOT_FOR_CACHE
-
-
-
-
 
 def _scan_one_path(rel_path, glob_pattern):
 
@@ -2021,10 +2008,6 @@ def _scan_one_path(rel_path, glob_pattern):
 
     return total, count, latest
 
-
-
-
-
 def _scan_cache_category(cat):
 
     """扫描一个分类的 size/count/last_modified（多路径合并）。"""
@@ -2053,10 +2036,6 @@ def _scan_cache_category(cat):
 
     return total_size, total_count, latest
 
-
-
-
-
 def _schedule_delete_on_reboot(path):
     """Windows 下将无法立即删除的占用文件登记为重启后删除（MOVEFILE_DELAY_UNTIL_REBOOT）。"""
     try:
@@ -2070,40 +2049,38 @@ def _schedule_delete_on_reboot(path):
 
 
 def _safe_remove_file(path):
-    """删除单个文件；被其他进程占用（如运行中的 bot SDK 持有句柄）时自动降级：
-    重命名为 <name>.old.<timestamp> 并重建同名空文件，占用进程继续写旧文件、
-    新写入落到空文件；旧文件尽量立即删除，失败则登记重启后删除。
+    """删除单个文件；被其他进程占用（如运行中的 bot SDK 持有句柄）时自动多级降级：
+
+    1) 直接 os.remove；
+    2) 失败（文件被占用，Windows 下 os.rename 也会失败）则尝试把文件**截断为 0 字节**
+       （Windows/Linux 下即使文件被另一进程以默认共享模式打开也能成功），立即释放
+       磁盘空间，占用进程后续以 append 方式继续写入（日志场景安全）；
+    3) 仍失败则登记为**重启后删除**（MOVEFILE_DELAY_UNTIL_REBOOT，Windows）。
+
     返回 (success, freed_bytes)。"""
     try:
         sz = os.path.getsize(path)
     except OSError:
         return False, 0
+    # 1) 直接删除
     try:
         os.remove(path)
         return True, sz
     except OSError:
         pass
+    # 2) 文件被占用：截断为 0 字节，立即释放空间（append 写入的日志安全）
     try:
-        import time as _t
-        ts = int(_t.time())
-        moved = "%s.old.%d" % (path, ts)
-        i = 0
-        while os.path.exists(moved):
-            i += 1
-            moved = "%s.old.%d.%d" % (path, ts, i)
-        os.rename(path, moved)
-        try:
-            with open(path, "w", encoding="utf-8"):
-                pass
-        except Exception:
-            pass
-        try:
-            os.remove(moved)
-        except OSError:
-            _schedule_delete_on_reboot(moved)
+        os.truncate(path, 0)
         return True, sz
     except OSError:
-        return False, 0
+        pass
+    # 3) 仍失败（极少）：登记重启后删除（仅 Windows 有效，失败静默）
+    try:
+        _schedule_delete_on_reboot(path)
+        return True, sz
+    except Exception:
+        pass
+    return False, 0
 
 
 def _do_clean_cache(item_keys, max_age_days=0):
@@ -2278,10 +2255,6 @@ def _do_clean_cache(item_keys, max_age_days=0):
 
     return freed, deleted, details
 
-
-
-
-
 def _build_cache_stats_items(keys=None):
 
     """构造 API 返回的缓存统计列表。keys=None 表示全部。"""
@@ -2315,10 +2288,6 @@ def _build_cache_stats_items(keys=None):
         })
 
     return items
-
-
-
-
 
 def _format_size(n):
 
@@ -2504,17 +2473,9 @@ def _check_cache_clean_schedule(now=None):
 
             _format_size(freed), deleted, len(details)), flush=True)
 
-
-
-
-
 # 整点报时（自动）图片源，与 modules/group_admin.py 中 _CHIME_API_URL 保持一致
 
 _CHIME_API_URL = "https://api.yuafeng.cn/API/ly/time.php"
-
-
-
-
 
 async def _chime_broadcast(api, gids):
 
@@ -2552,10 +2513,6 @@ async def _chime_broadcast(api, gids):
 
     print("[chime] 自动报时完成: 成功 %d, 失败 %d" % (ok, fail), flush=True)
 
-
-
-
-
 def _aggregate_chime_groups():
 
     """从成员表聚合所有出现过的群 openid（与 /api/groups 同源）。"""
@@ -2583,10 +2540,6 @@ def _aggregate_chime_groups():
         print("[chime] 聚合群列表失败: %s" % e, flush=True)
 
         return set()
-
-
-
-
 
 def _dispatch_chime_broadcast(gids):
 
@@ -2630,17 +2583,21 @@ def _dispatch_chime_broadcast(gids):
 
     return dispatched
 
-
-
-
-
 def _check_chime_schedule(now=None):
 
     """按群独立配置的整点报时：仅当 minute==0（整点），且落在各群时段/间隔内时，
 
-    向该群主动推送报时图。每个群的设置相互独立。"""
+    向该群主动推送报时图。每个群的设置相互独立。
+
+    门控：仅当「整点报时」插件（plugins/chime）已安装时生效（可安装/卸载）。"""
 
     from datetime import datetime
+
+    try:
+        if plugin_registry.get_plugin("chime") is None:
+            return
+    except Exception:
+        return
 
     if now is None:
 
@@ -2724,10 +2681,6 @@ def _check_chime_schedule(now=None):
 
     print("[chime] 整点报时已向 %d 个群提交广播（%s）" % (len(pending), stamp), flush=True)
 
-
-
-
-
 def _trigger_chime_now(group_openid=None):
 
     """立即向指定群（或全部已启用群）广播一次整点报时图（手动/测试用）。"""
@@ -2789,10 +2742,6 @@ def _trigger_chime_now(group_openid=None):
         result["message"] = "机器人桥接未就绪，报时失败"
 
     return result
-
-
-
-
 
 def _load_system_config():
 
@@ -3025,6 +2974,8 @@ def _load_system_config():
 
                 "lottery_cost": max(1, _coerce_int(raw_checkin.get("lottery_cost", _CHECKIN_DEFAULT["lottery_cost"]), _CHECKIN_DEFAULT["lottery_cost"])),
 
+                "lottery_daily_limit": max(0, _coerce_int(raw_checkin.get("lottery_daily_limit", _CHECKIN_DEFAULT["lottery_daily_limit"]), _CHECKIN_DEFAULT["lottery_daily_limit"])),
+
             }
 
             print("[console_server] 已恢复系统开关 %d 项，视频限制 %d 组，缓存清理 %s，整点报时已配置 %d 群（启用 %d），签到积分规则已加载；多机器人覆盖 %d 个 bot" % (
@@ -3050,10 +3001,6 @@ def _load_system_config():
         _chime_groups = {}
 
         _checkin_config = dict(_CHECKIN_DEFAULT)
-
-
-
-
 
 def _save_system_config():
 
@@ -3097,19 +3044,11 @@ def _save_system_config():
 
         print("[console_server] 保存系统配置失败: %s" % e, flush=True)
 
-
-
-
-
 def get_video_limits():
 
     """返回视频限制配置（始终包含 parse/system 两组完整字段）。供业务模块运行时读取。"""
 
     return _video_limits
-
-
-
-
 
 # ============================================================
 
@@ -3127,9 +3066,19 @@ _sensitive_words_seq = 0
 
 _ai_config = {"auto_revoke": False}
 
-
-
-
+def _call_ocr(image_url, timeout=40):
+    """调用 HunyuanOCR 图片识别辅助，返回识别文字（失败返回空串）。"""
+    try:
+        _u = "https://openapi.dwo.cc/api/ocr?url=" + urllib.parse.quote(image_url, safe="")
+        _req = urllib.request.Request(_u, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(_req, timeout=timeout) as _r:
+            _raw = _r.read().decode("utf-8", errors="replace")
+        _data = _json.loads(_raw)
+        if isinstance(_data, dict) and _data.get("code") == 200:
+            return str(_data.get("data") or "")
+    except Exception as e:
+        print("[console_server] OCR 识别失败: %s" % e, flush=True)
+    return ""
 
 def _providers_file(appid):
     return _bot_file(appid, "ai_providers.json")
@@ -3170,10 +3119,6 @@ def _load_ai_providers(bot=""):
         lst = []
     _AI_PROVIDERS_BY_BOT[appid] = lst
     return lst
-
-
-
-
 
 def _coerce_id(value):
 
@@ -3223,10 +3168,6 @@ def _coerce_id(value):
 
         return value
 
-
-
-
-
 def _save_ai_providers(bot="", data=None):
     appid = _resolve_provider_appid(bot)
     if data is None:
@@ -3244,17 +3185,11 @@ def _save_ai_providers(bot="", data=None):
     except Exception as e:
         print("[console_server] 保存 AI 供应商失败(%s): %s" % (appid, e), flush=True)
 
-
-
-
-
 # --------------------------------------------------------------------------
 
 # AI 大模型连接（OpenAI 兼容 / Ollama 本地）
 
 # --------------------------------------------------------------------------
-
-
 
 def _normalize_openai_endpoint(url):
 
@@ -3276,15 +3211,9 @@ def _normalize_openai_endpoint(url):
 
     return base + "/chat/completions"
 
-
-
-
-
 def _build_messages_from_payload(payload):
 
     """从请求体构造 messages 列表。
-
-
 
     优先使用显式传入的 messages（前端持有完整对话上下文）；
 
@@ -3356,10 +3285,6 @@ def _build_messages_from_payload(payload):
 
     return out
 
-
-
-
-
 def _http_post_json(endpoint, body, headers, timeout):
 
     data = _json.dumps(body).encode("utf-8")
@@ -3371,10 +3296,6 @@ def _http_post_json(endpoint, body, headers, timeout):
         raw = resp.read().decode("utf-8", errors="replace")
 
     return _json.loads(raw)
-
-
-
-
 
 def _call_openai_chat(provider, messages, timeout=90):
 
@@ -3450,10 +3371,6 @@ def _call_openai_chat(provider, messages, timeout=90):
 
     return str(msg.get("content") or "").strip()
 
-
-
-
-
 def _call_ollama_chat(provider, messages, timeout=180):
 
     base = (provider.get("url") or "").strip().rstrip("/")
@@ -3514,10 +3431,6 @@ def _call_ollama_chat(provider, messages, timeout=180):
 
     return str(content or "").strip()
 
-
-
-
-
 def _call_provider_chat(provider, messages, timeout=90):
 
     ptype = str(provider.get("type") or "openai").strip().lower()
@@ -3527,10 +3440,6 @@ def _call_provider_chat(provider, messages, timeout=90):
         return _call_ollama_chat(provider, messages, timeout=timeout)
 
     return _call_openai_chat(provider, messages, timeout=timeout)
-
-
-
-
 
 def _resolve_provider_for_test(payload, bot=""):
 
@@ -3574,17 +3483,11 @@ def _resolve_provider_for_test(payload, bot=""):
 
     }
 
-
-
-
-
 # --------------------------------------------------------------------------
 
 # 暴露给 bot.py 使用的 AI 对话接口
 
 # --------------------------------------------------------------------------
-
-
 
 def get_default_ai_provider(bot=""):
 
@@ -3609,151 +3512,79 @@ def get_default_ai_provider(bot=""):
 
     return None
 
-
-
-
-
 def chat_with_ai_for_bot(messages, provider_id=None, timeout=90, bot=None):
-
     """bot.py 调用的 AI 对话接口。
 
     参数:
 
       messages: list[dict]，形如 [{"role": "user", "content": "..."}]
-
-      provider_id: 指定供应商 id（int / str / None）；为 None 时使用默认供应商
-
+      provider_id: 供应商 id（int / str / None）；None 时按默认自配供应商
       timeout: 请求超时（秒）
-
     返回: (ok: bool, content: str, error: str, provider_name: str)
-
     """
 
-    with _lock:
-
-        provider = None
-
-        if provider_id is not None:
-
-            pid = _coerce_id(provider_id)
-
-            for p in _load_ai_providers(bot):
-
-                if p.get("id") == pid:
-
-                    provider = p
-
-                    break
-
-        if not provider:
-
-            provider = get_default_ai_provider()
-
-    pname = (provider or {}).get("name") or "AI"
-
-    if not provider:
-
-        return False, "", "未配置任何 AI 供应商，请到管理后台「AI 模型」中添加", ""
-
-    if not provider.get("url"):
-
-        return False, "", "AI 供应商「%s」未填写 API 地址" % pname, pname
-
-    if not provider.get("model"):
-
-        return False, "", "AI 供应商「%s」未填写模型" % pname, pname
-
-    # 注入人格设置 + 知识库上下文（作为 system message 前置到对话）
-
+    # 人格 + 知识库上下文（自配路径）
     try:
-
         from modules.ai_persona import build_ai_context
-
         _persona, _knowledge = build_ai_context(bot)
-
     except Exception as _e:
-
         logger.warning("[AI对话] 加载人格/知识库失败: %s" % _e)
-
         _persona, _knowledge = "", ""
-
     _final_messages = []
-
     if _persona:
-
         _final_messages.append({"role": "system", "content": _persona})
-
     if _knowledge:
-
         _final_messages.append({"role": "system", "content": _knowledge})
-
     _final_messages.extend(list(messages))
 
-
-
+    # 自配路径
+    with _lock:
+        provider = None
+        if provider_id is not None:
+            pid = _coerce_id(provider_id)
+            for p in _load_ai_providers(bot):
+                if p.get("id") == pid:
+                    provider = p
+                    break
+        if not provider:
+            provider = get_default_ai_provider(bot)
+    pname = (provider or {}).get("name") or "AI"
+    if not provider:
+        return False, "", "未配置任何 AI 供应商，请到管理后台「AI 模型」中添加", ""
+    if not provider.get("url"):
+        return False, "", "AI 供应商「%s」未填写 API 地址" % pname, pname
+    if not provider.get("model"):
+        return False, "", "AI 供应商「%s」未填写模型" % pname, pname
     try:
-
         reply = _call_provider_chat(provider, _final_messages, timeout=timeout)
-
     except urllib.error.HTTPError as e:
-
         detail = ""
-
         try:
-
             detail = e.read().decode("utf-8", errors="replace")
-
         except Exception:
-
             pass
-
         msg = "HTTP %d：%s" % (e.code, detail[:200])
-
-        # 简单识别 401/403/429
-
         if e.code in (401, 403):
-
             msg = "鉴权失败（HTTP %d）：请检查 API Key 是否有效 / 已过期。%s" % (e.code, detail[:120])
-
         elif e.code == 429:
-
             msg = "请求过于频繁（HTTP 429），请稍后重试。%s" % detail[:120]
-
         return False, "", msg, pname
-
     except urllib.error.URLError as e:
-
         return False, "", "网络错误：%s" % _describe_urllib_err(e), pname
-
     except Exception as e:
-
         return False, "", "调用失败：%s" % str(e)[:200], pname
-
     if not reply:
-
         return False, "", "模型返回内容为空（可能 key 失效或余额不足）", pname
-
     return True, reply, "", pname
-
-
-
-
-
 def _describe_urllib_err(e):
 
     reason = getattr(e, "reason", e)
 
     return "无法连接服务：%s" % reason
 
-
-
-
-
 def _format_models_error(status, detail, provider):
 
     """将 /models 接口的 HTTP 错误转成更友好的中文提示。
-
-
 
     重点：401 + 「Token/Invalid token/key」通常是 API Key 无效/过期/复制不完整
 
@@ -3786,8 +3617,6 @@ def _format_models_error(status, detail, provider):
                                 "未授权", "密钥错误", "认证失败")):
 
         looks_unauth = True
-
-
 
     if looks_unauth:
 
@@ -3835,8 +3664,6 @@ def _format_models_error(status, detail, provider):
 
         )
 
-
-
     if status == 404:
 
         return ("无法找到模型列表接口（HTTP 404），当前地址「%s」可能没有 /models 端点，"
@@ -3850,10 +3677,6 @@ def _format_models_error(status, detail, provider):
         return "接口返回 HTTP 429：触发限流，请稍后再试。原始响应：%s" % (body or "（空）")
 
     return "接口返回错误 %s：%s" % (status, body or "（无响应体）")
-
-
-
-
 
 def _load_sensitive_words():
 
@@ -3885,10 +3708,6 @@ def _load_sensitive_words():
 
         _ai_config = {"auto_revoke": False}
 
-
-
-
-
 def _save_sensitive_words():
 
     try:
@@ -3905,10 +3724,6 @@ def _save_sensitive_words():
 
         print("[console_server] 保存敏感词失败: %s" % e, flush=True)
 
-
-
-
-
 _load_feature_configs()
 
 _load_qa_rules()
@@ -3920,10 +3735,6 @@ _load_ai_providers()
 _load_sensitive_words()
 
 _load_runtime_settings()
-
-
-
-
 
 # ============================================================
 
@@ -3942,10 +3753,6 @@ _scheduler_started = False
 _scheduler_lock = threading.RLock()
 
 _scheduler_last_minute = None
-
-
-
-
 
 def _load_scheduled_tasks():
 
@@ -3973,10 +3780,6 @@ def _load_scheduled_tasks():
 
         _scheduled_tasks_seq = 0
 
-
-
-
-
 def _save_scheduled_tasks():
 
     try:
@@ -3993,15 +3796,7 @@ def _save_scheduled_tasks():
 
         print("[console_server] 保存定时任务失败: %s" % e, flush=True)
 
-
-
-
-
 _load_scheduled_tasks()
-
-
-
-
 
 def _parse_cron_field(field, min_val, max_val):
 
@@ -4050,10 +3845,6 @@ def _parse_cron_field(field, min_val, max_val):
             values.add(int(part))
 
     return values
-
-
-
-
 
 def _match_cron(cron_expr, dt):
 
@@ -4106,10 +3897,6 @@ def _match_cron(cron_expr, dt):
         print("[console_server] cron 匹配异常 %s: %s" % (cron_expr, e), flush=True)
 
         return False
-
-
-
-
 
 async def _execute_scheduled_task(task):
 
@@ -4167,10 +3954,6 @@ async def _execute_scheduled_task(task):
 
         return False
 
-
-
-
-
 def _mark_task_executed(task_id):
 
     """更新任务执行次数和上次执行时间。"""
@@ -4192,10 +3975,6 @@ def _mark_task_executed(task_id):
                 break
 
     _save_scheduled_tasks()
-
-
-
-
 
 def _scheduler_tick():
 
@@ -4285,10 +4064,6 @@ def _scheduler_tick():
 
             print("[console_server] 调度任务检查异常: %s" % e, flush=True)
 
-
-
-
-
 def _scheduler_loop():
 
     """调度器守护线程主循环。"""
@@ -4304,10 +4079,6 @@ def _scheduler_loop():
             print("[console_server] 调度器循环异常: %s" % e, flush=True)
 
         time.sleep(15)
-
-
-
-
 
 def _start_scheduled_tasks_scheduler():
 
@@ -4328,10 +4099,6 @@ def _start_scheduled_tasks_scheduler():
     t.start()
 
     print("[console_server] 定时任务调度器已启动", flush=True)
-
-
-
-
 
 def _upsert_member(openid, bot, nickname, avatar, source_type, group_openid,
                    member_role=None):
@@ -4437,10 +4204,6 @@ def _upsert_member(openid, bot, nickname, avatar, source_type, group_openid,
 
         print("[console_server] 归集成员失败: %s" % e, flush=True)
 
-
-
-
-
 def _qq_avatar_url(openid):
 
     """根据 QQ 机器人 openid 生成头像 URL（腾讯官方接口）。"""
@@ -4464,10 +4227,6 @@ def _qq_avatar_url(openid):
         return ""
 
     return "https://thirdqq.qlogo.cn/qqapp/%s/%s/100" % (appid, openid)
-
-
-
-
 
 _messages = []
 
@@ -4565,10 +4324,6 @@ _pending_until = 0.0          # 缓冲到期的 unix 时间戳
 
 _PENDING_DELAY = 5.0         # 指令生效前的缓冲秒数
 
-
-
-
-
 def _start_today_stats_flusher():
 
     """后台守护线程：每 30s 把「今日」计数落盘，避免高频消息计数因重启丢失。"""
@@ -4595,11 +4350,16 @@ def _start_today_stats_flusher():
 
     t.start()
 
-
-
-
-
 def start_console_server(open_browser=True):
+
+    # 预热 AI 人格/知识库模块：避免运行期 HTTP 线程首次 `from modules.ai_persona
+    # import ...` 与 bot 主线程处理 AI 消息时的同模块 import 在全局 import 锁上
+    # 竞争，导致 /api/ai/persona、/api/ai/knowledge 等端点长时间无响应
+    # （表现为控制台人格/知识库的「新建 / 保存 / 删除」全部点不动）。
+    try:
+        import modules.ai_persona  # noqa
+    except Exception as _e:
+        print("[console_server] 预热 AI 人格模块失败: %s" % _e, flush=True)
 
     # 开启机器人运行日志采集（stdout/stderr -> 日志中心）
 
@@ -4651,15 +4411,9 @@ def start_console_server(open_browser=True):
 
     return True
 
-
-
-
-
 def _open_admin_browser_later(host="127.0.0.1", port=9988):
 
     """后台等待 API 端口就绪后自动打开浏览器管理后台，失败则提示手动访问。"""
-
-
 
     def _wait_and_open():
 
@@ -4697,8 +4451,6 @@ def _open_admin_browser_later(host="127.0.0.1", port=9988):
 
         print("[console_server] 等待管理后台端口超时，请手动访问: %s" % url, flush=True)
 
-
-
     t = threading.Thread(
 
         target=_wait_and_open, name="xiaoliu-open-browser", daemon=True
@@ -4706,10 +4458,6 @@ def _open_admin_browser_later(host="127.0.0.1", port=9988):
     )
 
     t.start()
-
-
-
-
 
 def update_status(**kwargs):
 
@@ -4722,10 +4470,6 @@ def update_status(**kwargs):
         _status["uptime_seconds"] = int(time.time() - _started_at)
 
     return True
-
-
-
-
 
 def _collect_sys_stats():
     """采集整台电脑的资源占用（CPU / 内存 / GPU），用于状态面板。
@@ -4809,8 +4553,6 @@ def _collect_network_latency(host="qq.com", timeout=1.5):
 
     """通过 ICMP ping 探测到目标主机的延迟（毫秒），失败返回 None。
 
-
-
     兼容 Windows / Linux / macOS，输出中英文均可解析。
 
     """
@@ -4822,8 +4564,6 @@ def _collect_network_latency(host="qq.com", timeout=1.5):
         import re
 
         import sys
-
-
 
         if sys.platform.startswith("win"):
 
@@ -4875,23 +4615,13 @@ def _collect_network_latency(host="qq.com", timeout=1.5):
 
     return None
 
-
-
-
-
 # 网速采样状态（模块级，跨请求保持以便计算真实速率）
 
 _net_io_prev = None  # (bytes_recv, bytes_sent, ts)
 
-
-
-
-
 def _collect_network_speed():
 
     """返回实时网速（字节/秒）：下行 recv_bps、上行 send_bps。
-
-
 
     通过两次采样 psutil.net_io_counters 的差值 / 时间差计算；
 
@@ -4904,8 +4634,6 @@ def _collect_network_speed():
     try:
 
         import psutil
-
-
 
         cur = psutil.net_io_counters()
 
@@ -4943,10 +4671,6 @@ def _collect_network_speed():
 
         return {"recv_bps": None, "send_bps": None}
 
-
-
-
-
 def _format_uptime_str(sec):
 
     """把秒数格式化为运行时长字符串：不足一天显示 HH:MM:SS，超过一天显示 Nd HH:MM:SS。"""
@@ -4976,10 +4700,6 @@ def _format_uptime_str(sec):
         return "%d天%02d:%02d:%02d" % (d, h, m, s)
 
     return "%02d:%02d:%02d" % (h, m, s)
-
-
-
-
 
 def _get_status_data():
 
@@ -5024,10 +4744,6 @@ def _get_status_data():
         )
 
         return dict(_status)
-
-
-
-
 
 def record_message(*args, **kwargs):
 
@@ -5075,10 +4791,6 @@ def record_message(*args, **kwargs):
 
     return True
 
-
-
-
-
 def console_log(msg, *args, **kwargs):
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5093,17 +4805,11 @@ def console_log(msg, *args, **kwargs):
 
     print(ts, line, flush=True)
 
-
-
-
-
 def record_bot_reply(*args, chat_id=None, content=None, scene=None, target_id=None, msg_type="text",
 
                      media_url="", nickname="", avatar=""):
 
     """记录机器人主动发出的消息到消息中心（下行），供实时监控页展示双方消息。
-
-
 
     支持 modules/common.py 中的两种历史位置调用方式：
 
@@ -5141,8 +4847,6 @@ def record_bot_reply(*args, chat_id=None, content=None, scene=None, target_id=No
 
                 return True
 
-
-
         # 从 chat_id 解析场景和 target_id
 
         _chat_id = chat_id or ""
@@ -5164,8 +4868,6 @@ def record_bot_reply(*args, chat_id=None, content=None, scene=None, target_id=No
             # 无前缀且未显式指定场景时，默认按群聊处理
 
             scene, target_id = "group", _chat_id
-
-
 
         if not scene:
 
@@ -5199,10 +4901,6 @@ def record_bot_reply(*args, chat_id=None, content=None, scene=None, target_id=No
 
     return True
 
-
-
-
-
 def increment_api_call(n=1):
 
     with _lock:
@@ -5210,10 +4908,6 @@ def increment_api_call(n=1):
         _status["api_call_count"] = _status.get("api_call_count", 0) + int(n or 1)
 
     return _status["api_call_count"]
-
-
-
-
 
 def fetch_and_save_qq_info(*args, **kwargs):
 
@@ -5273,8 +4967,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
         member_openid = member_openid or ""
 
-
-
     # 占位默认值（任何 API 都不通时返回）
 
     placeholder = {
@@ -5293,13 +4985,9 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
     }
 
-
-
     if not qq_number:
 
         return placeholder
-
-
 
     # 延迟导入（避免循环引用 & 启动慢）
 
@@ -5319,15 +5007,11 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
         DWO_QQ_INFO_URL, APIBYTE_QQ_INFO_URL, QQ_INFO_KEY, SHWGIJ_KEY = "", "", "", ""
 
-
-
     # 清掉旧错误
 
     with _lock:
 
         _status["last_qq_api_error"] = ""
-
-
 
     # ============================================================
 
@@ -5351,8 +5035,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
     have_any = False
 
-
-
     def _merge(src):
 
         nonlocal have_any
@@ -5375,8 +5057,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
             have_any = True
 
-
-
     # 0. OIAPI Openid（免鉴权官方渠道，仅 nickname；最高优先级）
 
     if member_openid:
@@ -5389,8 +5069,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
             have_any = True
 
-
-
     # 1. 川源 dwo xxcx（拿 nickname/QID/qqLevel/regTime/signature/vip_level）
 
     if DWO_QQ_FULL_URL and DWO_QQ_CKEY:
@@ -5400,8 +5078,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
             _status["last_qq_api_error"] = "川源xxcx请求中…"
 
         _merge(_fetch_qq_via_dwo_xxcx(qq_number, DWO_QQ_FULL_URL, DWO_QQ_CKEY))
-
-
 
     # 2. 川源 dwo qqnet（active_days/opened_services/super_vip 等）
 
@@ -5413,8 +5089,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
         _merge(_fetch_qq_via_dwo(qq_number, DWO_QQ_INFO_URL))
 
-
-
     # 3. APIBYTE（昵称/头像）
 
     if APIBYTE_QQ_INFO_URL:
@@ -5424,8 +5098,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
             _status["last_qq_api_error"] = "APIBYTE请求中…"
 
         _merge(_fetch_qq_via_apibyte(qq_number, APIBYTE_QQ_INFO_URL))
-
-
 
     # 4. 小渡 API（兜底）
 
@@ -5437,8 +5109,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
         _merge(_fetch_qq_via_xiaodu(qq_number, QQ_INFO_KEY))
 
-
-
     # 5. 相见拾光（兜底）
 
     if not merged.get("nickname") and SHWGIJ_KEY:
@@ -5448,8 +5118,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
             _status["last_qq_api_error"] = "相见拾光API请求中…"
 
         _merge(_fetch_qq_via_shwgij(qq_number, SHWGIJ_KEY))
-
-
 
     if have_any:
 
@@ -5465,8 +5133,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
 
         return merged
 
-
-
     with _lock:
 
         if not DWO_QQ_FULL_URL and not DWO_QQ_INFO_URL and not APIBYTE_QQ_INFO_URL and not QQ_INFO_KEY and not SHWGIJ_KEY:
@@ -5480,10 +5146,6 @@ def fetch_and_save_qq_info(*args, **kwargs):
                 "所有可用 API 都返回空数据（DWO xxcx/qqnet / APIBYTE / 小渡 / 相见拾光 均失败）")
 
     return merged
-
-
-
-
 
 # 川源/dwo xxcx API 错误日志节流：避免外部接口连续超时（默认 8s）时打印风暴刷屏。
 # _status["last_qq_api_error"] 仍按调用方原逻辑逐次更新（前端要最新），仅 print 节流。
@@ -5780,10 +5442,6 @@ def _fetch_qq_via_dwo_xxcx(qq: str, base_url: str, ckey: str) -> dict:
 
     }
 
-
-
-
-
 def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
 
     """APIBYTE（apione.apibyte.cn）查询QQ基础资料（昵称/头像/邮箱/QQ空间）。
@@ -5808,6 +5466,8 @@ def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
 
     url = "%s%sqq=%s" % (base_url, sep, qq)
 
+    data = {}
+
     try:
 
         import requests  # noqa
@@ -5824,7 +5484,15 @@ def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
 
                 raw = r.read().decode("utf-8", "ignore")
 
-            data = _json.loads(raw) if raw else {}
+            # 空响应/非 JSON：视为该源无数据，交给其它源兜底，不报错刷屏
+
+            try:
+
+                data = _json.loads(raw) if raw.strip() else {}
+
+            except Exception:
+
+                data = {}
 
         except Exception as e:
 
@@ -5842,7 +5510,15 @@ def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
 
             r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
 
-            data = r.json() if r.status_code == 200 else {}
+            # 空响应/非 JSON：同上，视为无数据，不报错
+
+            try:
+
+                data = r.json() if r.status_code == 200 and r.content else {}
+
+            except Exception:
+
+                data = {}
 
         except Exception as e:
 
@@ -5853,6 +5529,10 @@ def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
                 _status["last_qq_api_error"] = "APIBYTE请求失败: %s" % e
 
             return {}
+
+    if not isinstance(data, dict) or not data:
+
+        return {}
 
     if not isinstance(data, dict):
 
@@ -5907,10 +5587,6 @@ def _fetch_qq_via_apibyte(qq: str, base_url: str) -> dict:
         "qzone": str(node.get("qzone") or ""),
 
     }
-
-
-
-
 
 def _fetch_qq_via_dwo(qq: str, base_url: str) -> dict:
 
@@ -6174,8 +5850,6 @@ def _fetch_qq_via_dwo(qq: str, base_url: str) -> dict:
 
             return False
 
-
-
     expert_days = ""
 
     expert_src = ""
@@ -6340,10 +6014,6 @@ def _fetch_qq_via_dwo(qq: str, base_url: str) -> dict:
 
     }
 
-
-
-
-
 def _fetch_qq_via_xiaodu(qq: str, key: str) -> dict:
 
     """小渡API（https://xxapi.cn）查询QQ资料。"""
@@ -6484,10 +6154,6 @@ def _fetch_qq_via_xiaodu(qq: str, key: str) -> dict:
 
     }
 
-
-
-
-
 def _fetch_qq_via_shwgij(qq: str, key: str) -> dict:
 
     """相见拾光API（https://api.shwgij.com）查询QQ资料。"""
@@ -6602,15 +6268,9 @@ def _fetch_qq_via_shwgij(qq: str, key: str) -> dict:
 
     }
 
-
-
-
-
 def _fetch_nickname_via_oiapi_openid(member_openid):
 
     """通过 OIAPI Openid 接口反查 QQ 用户昵称（免鉴权官方渠道）。
-
-
 
     文档：https://oiapi.net/api/Openid
 
@@ -6622,8 +6282,6 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
 
     鉴权：实测免 ckey（三种鉴权方式返回完全一致，无需任何 key）。
 
-
-
     用途：填 _upsert_member 时 author.username 为空 / 用户未绑 QQ 时无法反查昵称的洞。
 
     """
@@ -6632,8 +6290,6 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
 
         return ""
 
-
-
     with _lock:
 
         cached = _oiapi_nickname_cache.get(member_openid)
@@ -6641,8 +6297,6 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
         if cached is not None:
 
             return cached
-
-
 
     try:
 
@@ -6656,21 +6310,15 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
 
         return ""
 
-
-
     if not OIAPI_OPENID_URL:
 
         return ""
-
-
 
     appid = (OIAPI_OPENID_APPID or APPID or "").strip()
 
     if not appid:
 
         return ""
-
-
 
     sep = "&" if ("?" in OIAPI_OPENID_URL) else "?"
 
@@ -6689,8 +6337,6 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
     except Exception:
 
         return ""
-
-
 
     try:
 
@@ -6750,10 +6396,6 @@ def _fetch_nickname_via_oiapi_openid(member_openid):
 
         return ""
 
-
-
-
-
 def _refresh_member_nickname_from_oiapi(member_openid):
 
     """用 OIAPI 反查昵称并更新 _members 缓存，返回新昵称（失败返回空）。"""
@@ -6777,10 +6419,6 @@ def _refresh_member_nickname_from_oiapi(member_openid):
             _save_members()
 
     return nick
-
-
-
-
 
 def get_user_detail_info(member_openid):
 
@@ -6914,27 +6552,17 @@ def get_user_detail_info(member_openid):
 
     return base
 
-
-
-
-
 def get_group_display_name(group_openid):
 
     with _lock:
 
         return _group_names.get(group_openid, "")
 
-
-
-
-
 def get_user_avatar_url(user_openid):
 
     with _lock:
 
         return _user_avatars.get(user_openid, "")
-
-
 
 def get_member_cached_nickname(openid):
 
@@ -6962,25 +6590,15 @@ def get_member_cached_nickname(openid):
 
         return ""
 
-
-
-
-
 # ===== 已绑定 QQ 用户的真实昵称/头像缓存（供消息监控界面展示） =====
 
 _user_real_profiles = {}
 
 _USER_PROFILE_TTL = 600  # 秒；10 分钟内重复请求不重新拉取
 
-
-
-
-
 def get_user_real_profile(openid):
 
     """返回已绑定 QQ 用户的真实昵称/头像（带缓存）。
-
-
 
     未绑定 QQ、或拉取失败则返回 None；拉取成功返回
 
@@ -7024,19 +6642,11 @@ def get_user_real_profile(openid):
 
     return real
 
-
-
-
-
 def invalidate_user_real_profile(openid):
 
     """绑定/解绑 QQ 后清空缓存，下次请求会刷新真实资料。"""
 
     _user_real_profiles.pop(openid, None)
-
-
-
-
 
 def _group_avatar_url(qq_number):
 
@@ -7053,10 +6663,6 @@ def _group_avatar_url(qq_number):
         return ""
 
     return "https://p.qlogo.cn/gh/%s/%s/640" % (qq, qq)
-
-
-
-
 
 def bind_group_qq_number(group_openid, qq_number):
 
@@ -7104,10 +6710,6 @@ def bind_group_qq_number(group_openid, qq_number):
 
     return True
 
-
-
-
-
 def get_group_profile(group_openid):
 
     """返回群的显示资料 {name, avatar, qq}；name 优先取用户手动设置的群名。"""
@@ -7127,10 +6729,6 @@ def get_group_profile(group_openid):
             avatar = _group_avatar_url(qq)
 
         return {"name": name, "avatar": avatar, "qq": qq}
-
-
-
-
 
 def set_group_name(group_openid, name):
 
@@ -7164,10 +6762,6 @@ def set_group_name(group_openid, name):
 
     return True
 
-
-
-
-
 def bind_user_qq_number(user_openid, qq_number):
 
     with _lock:
@@ -7186,29 +6780,17 @@ def bind_user_qq_number(user_openid, qq_number):
 
     return True
 
-
-
-
-
 def get_group_qq_number(group_openid):
 
     with _lock:
 
         return _group_qq_bindings.get(group_openid, "")
 
-
-
-
-
 def get_user_qq_number(user_openid):
 
     with _lock:
 
         return _user_qq_bindings.get(user_openid, "")
-
-
-
-
 
 def update_group_contact(group_openid, name=None, **kwargs):
 
@@ -7219,10 +6801,6 @@ def update_group_contact(group_openid, name=None, **kwargs):
             _group_names[group_openid] = str(name)
 
     return True
-
-
-
-
 
 def remove_group_contact(group_openid):
 
@@ -7294,10 +6872,6 @@ def remove_group_contact(group_openid):
 
     return True
 
-
-
-
-
 # ===== 今日事件计数器（进群 / 退群 / 加好友 / 删好友） =====
 
 # 以本地自然日为周期，跨天自动清零，与「今日」语义一致。
@@ -7313,10 +6887,6 @@ _TODAY_EVENT_KEYS = (
     "friends_removed_today",
 
 )
-
-
-
-
 
 def _rollover_today_counters_if_needed():
 
@@ -7334,10 +6904,6 @@ def _rollover_today_counters_if_needed():
                     _bb[_k] = 0
         _save_today_stats()
 
-
-
-
-
 def _inc_today_event(key, bot=""):
     with _lock:
         _rollover_today_counters_if_needed()
@@ -7347,40 +6913,21 @@ def _inc_today_event(key, bot=""):
             _bb[key] = _bb.get(key, 0) + 1
         _save_today_stats()
 
-
-
-
-
 def inc_groups_joined_today(bot=""):
     """机器人今日被拉入群聊数 +1。"""
     _inc_today_event("groups_joined_today", bot)
-
-
-
-
 
 def inc_groups_left_today(bot=""):
     """机器人今日被移出群聊数 +1。"""
     _inc_today_event("groups_left_today", bot)
 
-
-
-
-
 def inc_friends_added_today(bot=""):
     """今日新增好友数 +1。"""
     _inc_today_event("friends_added_today", bot)
 
-
-
-
-
 def inc_friends_removed_today(bot=""):
     """今日删除好友数 +1。"""
     _inc_today_event("friends_removed_today", bot)
-
-
-
 
 # =====================================================================
 # 今日小时级消息聚合（按自然日分桶；用于 admin 数据总览「今日活跃时段」图表）
@@ -7523,10 +7070,6 @@ def _snapshot_today_hourly():
 # 模块导入期执行：恢复历史并裁剪；任何异常不外抛
 _load_hourly_messages()
 
-
-
-
-
 def _load_today_stats():
     """启动时从磁盘恢复「今日」计数，使重启 / 关机不丢失当天统计。
     物理隔离：全局聚合存 data/bots/_shared/today_stats.json，
@@ -7623,10 +7166,6 @@ def _load_today_stats():
     except Exception as e:  # noqa: BLE001
         logger.warning("[today_stats] 加载失败（忽略）: %s" % e)
 
-
-
-
-
 def _save_today_stats():
     """原子落盘「今日」计数（物理隔离）。
     全局聚合 -> data/bots/_shared/today_stats.json；
@@ -7673,15 +7212,9 @@ def _save_today_stats():
     except Exception as e:  # noqa: BLE001
         logger.warning("[today_stats] 保存失败（忽略）: %s" % e)
 
-
-
-
-
 # 模块导入时恢复当天统计（在 _status / _lock / 常量定义之后）
 
 _load_today_stats()
-
-
 
 # 任何正常退出（含非 os._exit 的路径）都再落盘一次，作为最后兜底
 
@@ -7695,10 +7228,6 @@ except Exception:  # noqa: BLE001
 
     pass
 
-
-
-
-
 def update_friend_contact(user_openid, name=None, avatar=None, **kwargs):
 
     with _lock:
@@ -7708,10 +7237,6 @@ def update_friend_contact(user_openid, name=None, avatar=None, **kwargs):
             _user_avatars[user_openid] = str(avatar)
 
     return True
-
-
-
-
 
 def remove_friend_contact(user_openid):
 
@@ -7724,10 +7249,6 @@ def remove_friend_contact(user_openid):
     _save_qq_bindings()
 
     return True
-
-
-
-
 
 def sync_contact_from_message(scene, target_id, **kwargs):
 
@@ -7747,15 +7268,46 @@ def sync_contact_from_message(scene, target_id, **kwargs):
 
     return True
 
+def _known_bot_list():
 
+    """返回控制台已绑定机器人清单（含真实名/头像/实时连通），供公告「选机器人」下拉使用。"""
 
+    bots = []
+
+    try:
+
+        for _b in bot_manager.load_bots():
+
+            _aid = _b.get("appid") or ""
+
+            _rt = _bot_bridges.get(_aid) or {}
+
+            bots.append({
+
+                "appid": _aid,
+
+                "appid_masked": bot_manager.mask_appid(_aid),
+
+                "name": _b.get("name") or "",
+
+                "name_rt": (_rt.get("name") or _b.get("name") or ""),
+
+                "avatar": (_rt.get("avatar") or ""),
+
+                "connected": (_aid in _bot_bridges and _bot_bridges[_aid].get("api") is not None),
+
+            })
+
+    except Exception:
+
+        bots = []
+
+    return bots
 
 
 def get_known_contacts():
 
     """汇总「已知会话」，供控制台公告定向发布选择受众。
-
-
 
     返回：{
 
@@ -7802,6 +7354,7 @@ def get_known_contacts():
                         "name": gname,
 
                         "avatar": gprof.get("avatar") or "",
+                        "bot": GROUP_BOT_MAP.get(goid) or "",
 
                     }
 
@@ -7832,6 +7385,7 @@ def get_known_contacts():
                         "name": pname or sender,
 
                         "avatar": pavatar,
+                        "bot": USER_BOT_MAP.get(sender) or "",
 
                     }
 
@@ -7852,19 +7406,74 @@ def get_known_contacts():
                     "name": gname,
 
                     "avatar": prof.get("avatar") or "",
+                    "bot": GROUP_BOT_MAP.get(goid) or "",
 
                 }
 
+        
+        # 群聊受众：从 GROUP_BOT_MAP 补充（机器人实际加入的所有群）。
+        # _group_profiles 只保存 bot 处理过消息的群，通常远少于真实加入的群，
+        # 会导致公告面板群聊列表看起来很少。GROUP_BOT_MAP 是 QQ 平台事件建立的
+        # 机器人-群绑定关系，可信且持久，用它补全剩余群聊。
+        for goid, gappid in GROUP_BOT_MAP.items():
+            if goid in groups:
+                continue
+            gname = _group_names.get(goid) or ""
+            gavatar = ""
+            if not gname:
+                _entry = _group_info_cache.get(goid) or {}
+                _gdata = _entry.get("data") or {}
+                gname = _gdata.get("name") or ""
+                gavatar = _gdata.get("avatar") or ""
+            groups[goid] = {
+                "chat_id": "g:" + goid,
+                "openid": goid,
+                "name": gname or goid,
+                "avatar": gavatar,
+                "bot": gappid or "",
+            }
+
+        # 单聊受众：从持久化成员表补充（_message_logs 仅内存、重启即丢，
+        # 会导致好友范围长期为空、无法选择也无法定向发布）。
+        # 仅纳入有过「private」来源的真实单聊联系人。
+        for openid, m in _members.items():
+            if openid in persons:
+                continue
+            srcs = m.get("sources") or []
+            if not isinstance(srcs, (list, tuple, set)):
+                srcs = [srcs] if srcs else []
+            if "private" in srcs:
+                pname = m.get("nickname") or ""
+                persons[openid] = {
+                    "chat_id": "u:" + openid,
+                    "openid": openid,
+                    "name": pname or openid,
+                    "avatar": m.get("avatar") or "",
+                    "bot": USER_BOT_MAP.get(openid) or "",
+                }
         return {
 
             "groups": list(groups.values()),
 
             "persons": list(persons.values()),
+            "bots": _known_bot_list(),
 
         }
 
 
-
+def set_feature_enabled_global(name, enabled, appid=None):
+    """设置功能开关。供插件安装 hook 调用，自动启用 master 大类开关。
+    appid=None 时操作全局 _system_switches；非空时按 bot 隔离写入 _bot_system_switches。
+    """
+    with _lock:
+        if not name:
+            return
+        if appid:
+            _bot_system_switches.setdefault(str(appid), {})
+            _bot_system_switches[str(appid)][name] = bool(enabled)
+        else:
+            _system_switches[name] = bool(enabled)
+        _save_system_config()
 
 
 def is_feature_enabled(name, appid=None):
@@ -8030,6 +7639,22 @@ _SUB_CMD_MAP = {
 
     "星座运势": "game_horoscope",
 
+    "今日老婆": "game_wife_today",
+
+    "抽老婆": "game_wife_today",
+
+    "wife": "game_wife_today",
+
+    "脑筋急转弯": "game_brain_teaser",
+
+    "急转弯": "game_brain_teaser",
+
+    "猜谜语": "game_riddle",
+
+    "谜语": "game_riddle",
+
+    "猜谜": "game_riddle",
+
     "单词": "tool_word",
 
     "单词查询": "tool_word",
@@ -8041,6 +7666,16 @@ _SUB_CMD_MAP = {
     "垃圾分类": "tool_waste",    "垃圾分类": "tool_waste",
 
     "视频解析": "tool_video_parse",
+
+    "导航": "tool_navigation",
+
+    "导航规划": "tool_navigation",
+
+    "旅游": "tool_tourism",
+
+    "旅游查询": "tool_tourism",
+
+    "景点": "tool_tourism",
 
     "小说": "novel_menu",
 
@@ -8054,11 +7689,29 @@ _SUB_CMD_MAP = {
 
     "读小说": "novel_menu",
 
-    "学习": "study_menu",
+    "知识问答": "study_quiz",
 
-    "学习系统": "study_menu",
+    "常识": "study_quiz",
 
-    "学习菜单": "study_menu",
+    "问答": "study_quiz",
+
+    "驾考": "study_driving",
+
+    "驾考学习": "study_driving",
+
+    "考驾照": "study_driving",
+
+    "小学数学": "study_math",
+
+    "数学题": "study_math",
+
+    "数学": "study_math",
+
+    "古诗文": "study_poetry",
+
+    "古诗": "study_poetry",
+
+    "诗词": "study_poetry",
 
     "违禁词列表": "admin_banlist",
 
@@ -8071,8 +7724,6 @@ _SUB_CMD_MAP = {
     "整点报时": "admin_chime",
 
 }
-
-
 
 # 视频系统 6 大分类各自对应一个子开关
 
@@ -8112,8 +7763,6 @@ _VIDEO_SUB = {
 
 }
 
-
-
 # 前缀匹配（注意顺序：先精确、再视频分类、再前缀）
 
 _SUB_PREFIX_MAP = (
@@ -8138,6 +7787,10 @@ _SUB_PREFIX_MAP = (
 
     ("垃圾分类 ", "tool_waste"),
 
+    ("导航 ", "tool_navigation"),
+
+    ("旅游 ", "tool_tourism"),
+
     ("违禁词添加", "admin_banadd"),
 
     ("违禁词删除", "admin_bandel"),
@@ -8146,17 +7799,10 @@ _SUB_PREFIX_MAP = (
 
     ("读 ", "novel_read"),
 
-    ("作答", "study_answer"),
-
-    ("回答", "study_answer"),
-
 )
 
-
-
-_SUBJECT_RE = re.compile(r"^(语文|英语|数学|物理|化学|生物|历史|政治|地理)(文字|图片)?")
-
-
+# 旧学科出题正则已下线（学习系统改为知识问答/驾考/古诗文），保留空匹配避免影响其它正则
+_SUBJECT_RE = re.compile(r"^(?!x)x")
 
 # 子功能 key -> 所属系统总开关 key（用于 is_sub_feature_enabled 级联判断）
 
@@ -8174,11 +7820,13 @@ _SUB_TO_MASTER = {
 
     "game_gomoku": "game", "game_idiom": "game", "game_xiangqi": "game", "game_qiuqian": "game", "game_daanzi": "game", "game_tarot": "game", "game_horoscope": "game","game_qiuqian": "game", "game_daanzi": "game", "game_tarot": "game", "game_horoscope": "game",
 
-    "tool_weather": "tools", "tool_wangzhe": "tools", "game_horoscope": "game", "tool_disease": "tools", "tool_waste": "tools",
+    "tool_weather": "tools", "tool_wangzhe": "tools", "tool_navigation": "tools", "tool_tourism": "tools",
+    "game_horoscope": "game", "game_wife_today": "game", "game_brain_teaser": "game", "game_riddle": "game",
+    "tool_disease": "tools", "tool_waste": "tools",
 
     "novel_menu": "novel", "novel_read": "novel",
 
-    "study_menu": "study", "study_query": "study", "study_answer": "study",
+    "study_quiz": "study", "study_driving": "study", "study_math": "study", "study_poetry": "study",
 
     "admin_banlist": "group_admin", "admin_banset": "group_admin",
 
@@ -8189,8 +7837,6 @@ _SUB_TO_MASTER = {
     "admin_mute": "group_admin", "admin_mute_automod": "group_admin",
 
 }
-
-
 
 def sub_feature_key_for_cmd(cmd):
 
@@ -8224,29 +7870,17 @@ def sub_feature_key_for_cmd(cmd):
 
     return None
 
-
-
-
-
 def resolve_sub_feature(content):
 
     """供 bot.py 命令拦截门控使用：直接复用 sub_feature_key_for_cmd。"""
 
     return sub_feature_key_for_cmd(content)
 
-
-
-
-
 def get_master_feature(sub_key):
 
     """返回子功能所属的系统总开关 key；不属于任何系统返回 None。"""
 
     return _SUB_TO_MASTER.get(sub_key) if sub_key else None
-
-
-
-
 
 def get_sub_features_by_master(master_key):
 
@@ -8257,10 +7891,6 @@ def get_sub_features_by_master(master_key):
         return []
 
     return [k for k, v in _SUB_TO_MASTER.items() if v == master_key]
-
-
-
-
 
 def register_bot_bridge(api, loop=None, appid=None, name=None, avatar=""):
 
@@ -8294,8 +7924,6 @@ def register_bot_bridge(api, loop=None, appid=None, name=None, avatar=""):
 
     return True
 
-
-
 def unregister_bot_bridge(appid):
     """热重载时调用：清掉指定 appid 的桥接与持久化缓存（_default 桥接保留）。"""
     global _bot_bridges
@@ -8308,8 +7936,6 @@ def unregister_bot_bridge(appid):
     except Exception:
         pass
     return True
-
-
 
 def get_bridge(appid=None):
 
@@ -8331,10 +7957,6 @@ def get_bridge(appid=None):
 
     return None
 
-
-
-
-
 def get_bridge_for_chat(chat_id):
 
     """根据 chat_id(g:群/u:用户) 解析所属 bot 的桥接，失败回退首个就绪桥接。"""
@@ -8352,10 +7974,6 @@ def get_bridge_for_chat(chat_id):
         appid = USER_BOT_MAP.get(cid[2:])
 
     return get_bridge(appid)
-
-
-
-
 
 # ------------------------------------------------------------
 
@@ -8375,25 +7993,13 @@ _ALLOWED_MEDIA_EXT = {
 
 }
 
-
-
-
-
 def _media_ext(msg_type):
 
     return _MEDIA_EXT.get(msg_type, "bin")
 
-
-
-
-
 def _safe_ext(ext):
 
     return ext in _ALLOWED_MEDIA_EXT
-
-
-
-
 
 def _rand_hex(n=6):
 
@@ -8404,10 +8010,6 @@ def _rand_hex(n=6):
     except Exception:
 
         return str(int(time.time() * 1000))
-
-
-
-
 
 def _save_media_file(data, ext):
 
@@ -8432,10 +8034,6 @@ def _save_media_file(data, ext):
         f.write(data)
 
     return "/admin/media/" + fname
-
-
-
-
 
 async def _async_send_console_message(chat_id, msg_type, content, file_bytes):
 
@@ -8481,10 +8079,6 @@ async def _async_send_console_message(chat_id, msg_type, content, file_bytes):
 
         return (False, str(e))
 
-
-
-
-
 def _send_console_message(chat_id, msg_type, content, file_bytes):
 
     """线程安全包装：通过机器人事件循环发送消息并阻塞至完成。"""
@@ -8513,15 +8107,9 @@ def _send_console_message(chat_id, msg_type, content, file_bytes):
 
         return (False, str(e))
 
-
-
-
-
 def _push_announcement(targets, text):
 
     """把公告批量推送到指定受众（chat_id 列表）。返回 (成功列表, 失败列表)。
-
-
 
     每个 target 形如 "g:群openid" / "u:用户openid"；逐条通过机器人事件循环发送，
 
@@ -8557,8 +8145,6 @@ def _push_announcement(targets, text):
 
     return ok_list, fail_list
 
-
-
 # ------------------------------------------------------------
 # 群基本信息（QQ 官方 GET /v2/groups/{group_openid}/info）
 # ------------------------------------------------------------
@@ -8577,12 +8163,8 @@ _qpm_log = {}                    # appid -> deque[float]（每机器人独立 QP
 
 def _load_group_info_cache():
     global _group_info_cache
-    try:
-        if os.path.isfile(_GROUP_INFO_CACHE_FILE):
-            with open(_GROUP_INFO_CACHE_FILE, "r", encoding="utf-8") as f:
-                _group_info_cache = _json.load(f) or {}
-    except Exception as e:
-        print("[console_server] load group_info_cache failed: %s" % e, flush=True)
+    _group_info_cache = _load_json_safe(_GROUP_INFO_CACHE_FILE) or {}
+    if not isinstance(_group_info_cache, dict):
         _group_info_cache = {}
 
 
@@ -8590,8 +8172,7 @@ def _save_group_info_cache():
     try:
         if not os.path.isdir(_DATA_ROOT_DIR):
             os.makedirs(_DATA_ROOT_DIR, exist_ok=True)
-        with open(_GROUP_INFO_CACHE_FILE, "w", encoding="utf-8") as f:
-            _json.dump(_group_info_cache, f, ensure_ascii=False, indent=2)
+        _atomic_save_json(_GROUP_INFO_CACHE_FILE, _group_info_cache, indent=2)
     except Exception as e:
         print("[console_server] save group_info_cache failed: %s" % e, flush=True)
 
@@ -9001,8 +8582,7 @@ def _get_mute_group_config(openid):
     try:
         path = os.path.join(_DATA_ROOT_DIR, "group_admin.json")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                d = _json.load(f) or {}
+            d = _load_json_safe(path) or {}
             cfg = d.get(openid) or {}
             return {
                 "mute_duration": max(1, int(cfg.get("mute_duration", 600) or 600)),
@@ -9042,8 +8622,7 @@ def _set_mute_group_config(openid, mute_duration=None, mute_on_banword=None):
     try:
         path = os.path.join(_DATA_ROOT_DIR, "group_admin.json")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                d = _json.load(f) or {}
+            d = _load_json_safe(path) or {}
         else:
             d = {}
         cfg = d.setdefault(openid, {"banned_words": []})
@@ -9056,8 +8635,7 @@ def _set_mute_group_config(openid, mute_duration=None, mute_on_banword=None):
             cfg["mute_on_banword"] = bool(mute_on_banword)
         if not os.path.isdir(_DATA_ROOT_DIR):
             os.makedirs(_DATA_ROOT_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(d, f, ensure_ascii=False, indent=2)
+        _atomic_save_json(path, d, indent=2)
         return True, _get_mute_group_config(openid)
     except Exception as e:
         return False, {"error": "设置禁言配置失败：%s" % e}
@@ -9077,8 +8655,7 @@ def _get_banned_mute_config(openid):
     try:
         path = os.path.join(_DATA_ROOT_DIR, "group_admin.json")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                d = _json.load(f) or {}
+            d = _load_json_safe(path) or {}
             cfg = d.get(openid) or {}
             return {
                 "banned_words": list(cfg.get("banned_words", []) or []),
@@ -9124,8 +8701,7 @@ def _set_banned_mute_config(openid, banned_words=None, mute_duration=None, mute_
     try:
         path = os.path.join(_DATA_ROOT_DIR, "group_admin.json")
         if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                d = _json.load(f) or {}
+            d = _load_json_safe(path) or {}
         else:
             d = {}
         cfg = d.setdefault(openid, {"banned_words": []})
@@ -9140,8 +8716,7 @@ def _set_banned_mute_config(openid, banned_words=None, mute_duration=None, mute_
             cfg["mute_on_banword"] = bool(mute_on_banword)
         if not os.path.isdir(_DATA_ROOT_DIR):
             os.makedirs(_DATA_ROOT_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(d, f, ensure_ascii=False, indent=2)
+        _atomic_save_json(path, d, indent=2)
         return True, _get_banned_mute_config(openid)
     except Exception as e:
         return False, {"error": "设置配置失败：%s" % e}
@@ -9264,8 +8839,6 @@ def _approval_join_request_via_qq_sync(openid, member_openid, action, reason, jo
     except Exception as e:
         return False, {"error": "官方 /approval_join_request 调用失败：%s" % e}
     return True, {"data": raw if isinstance(raw, dict) else {}, "action": action}
-
-
 
 # ------------------------------------------------------------
 # 入群自动审批策略（bot 级：每个机器人最多 20 个策略，单策略最多关联 100 个群）
@@ -9498,9 +9071,6 @@ def _update_join_approval_whitelist_via_qq_sync(strategy_id, op, whitelist_users
 _JR_ADMIN_TTL = 600
 _jr_admin_cache = {}
 
-
-
-
 def _all_group_openids():
     """聚合所有出现过的群 openid（与 /api/groups 对齐）。
 
@@ -9650,10 +9220,6 @@ def _probe_bot_admin(gid):
 # 启动时加载缓存
 _load_group_info_cache()
 
-
-
-
-
 def _restart_bot():
 
     global _restart_requested
@@ -9672,10 +9238,6 @@ def _restart_bot():
 
     return True
 
-
-
-
-
 def _shutdown_bot():
 
     global _shutdown_requested
@@ -9685,10 +9247,6 @@ def _shutdown_bot():
     print("[console_server] _shutdown_bot requested", flush=True)
 
     return True
-
-
-
-
 
 # ============================================================
 
@@ -9706,10 +9264,6 @@ def _shutdown_bot():
 
 _control_watchdog_started = False
 
-
-
-
-
 def _close_current_window():
 
     """尽力关闭承载当前进程的控制台窗口，然后终止本进程（关机 / 重启后清理旧窗口）。"""
@@ -9717,8 +9271,6 @@ def _close_current_window():
     try:
 
         import psutil
-
-
 
         me = psutil.Process(os.getpid())
 
@@ -9749,16 +9301,10 @@ def _close_current_window():
         pass
 
     try:
-
+        _flush_all_data()
         os._exit(0)
-
     except Exception:
-
         pass
-
-
-
-
 
 def _shutdown_now():
 
@@ -9788,15 +9334,9 @@ def _shutdown_now():
 
     _close_current_window()
 
-
-
-
-
 def _get_main_script_path():
 
     """返回主脚本（bot.py）的绝对路径，用于重启时精确复用同一启动命令。
-
-
 
     优先取 __main__.__file__（即真正被 python 直接运行的脚本），
 
@@ -9824,15 +9364,9 @@ def _get_main_script_path():
 
     return os.path.abspath(__file__)
 
-
-
-
-
 def _close_admin_server_socket():
 
     """关闭当前进程的 9988 监听套接字，让新进程能干净地重新绑定端口。
-
-
 
     必须在 os._exit 之前调用，否则旧套接字仍占用端口，新进程绑定 9988 会失败。
 
@@ -9868,15 +9402,9 @@ def _close_admin_server_socket():
 
     print("[console_server] 已关闭旧 admin api 端口监听，准备重启", flush=True)
 
-
-
-
-
 def _restart_in_new_window():
 
     """重启：启动一个独立的新进程运行机器人，再退出当前进程。
-
-
 
     相比旧版（依赖 go.cmd + 可见控制台窗口），改进点：
 
@@ -9915,8 +9443,6 @@ def _restart_in_new_window():
         pass
 
     import subprocess
-
-
 
     _exe = sys.executable
 
@@ -9960,8 +9486,6 @@ def _restart_in_new_window():
     except Exception:
 
         _si = None
-
-
 
     _spawned = False
 
@@ -10012,7 +9536,7 @@ def _restart_in_new_window():
         try:
 
             _close_admin_server_socket()
-
+            _flush_all_data()
             os.execv(_exe, [_exe, _script] + _args)  # 成功则不返回
 
         except Exception as _e2:  # noqa: BLE001
@@ -10023,20 +9547,13 @@ def _restart_in_new_window():
 
             _spawned = False
 
-
-
     if _spawned:
-
         try:
-
+            _flush_all_data()
             sys.stdout.flush()
-
             sys.stderr.flush()
-
         except Exception:
-
             pass
-
         os._exit(0)
 
     else:
@@ -10045,10 +9562,6 @@ def _restart_in_new_window():
 
         print("[console_server] 重启失败，当前进程将继续运行", flush=True)
 
-
-
-
-
 def _control_watchdog_loop():
 
     global _restart_requested, _shutdown_requested, _pending_action, _pending_until
@@ -10056,8 +9569,6 @@ def _control_watchdog_loop():
     import sys
 
     import subprocess
-
-
 
     while True:
 
@@ -10115,10 +9626,6 @@ def _control_watchdog_loop():
 
             pass
 
-
-
-
-
 def _start_control_watchdog():
 
     global _control_watchdog_started
@@ -10139,10 +9646,6 @@ def _start_control_watchdog():
 
     print("[console_server] 控制看门狗已启动（重启/关机指令将真正生效）", flush=True)
 
-
-
-
-
 # ============================================================
 
 # 管理员名单（data/admin_list.json）
@@ -10159,43 +9662,20 @@ _ADMIN_LIST_FILE = os.path.join(
 
 )
 
-
-
-
-
 def _load_admin_list():
 
     """读取管理员名单，返回去重后的有序字符串列表。"""
 
-    try:
-
-        with open(_ADMIN_LIST_FILE, "r", encoding="utf-8") as _f:
-
-            _data = _json.load(_f)
-
-        if isinstance(_data, dict) and isinstance(_data.get("admins"), list):
-
-            _seen = []
-
-            for _x in _data["admins"]:
-
-                _s = str(_x).strip()
-
-                if _s and _s not in _seen:
-
-                    _seen.append(_s)
-
-            return _seen
-
-    except (OSError, ValueError):
-
-        pass
+    _data = _load_json_safe(_ADMIN_LIST_FILE)
+    if isinstance(_data, dict) and isinstance(_data.get("admins"), list):
+        _seen = []
+        for _x in _data["admins"]:
+            _s = str(_x).strip()
+            if _s and _s not in _seen:
+                _seen.append(_s)
+        return _seen
 
     return []
-
-
-
-
 
 def _save_admin_list(admins):
 
@@ -10219,19 +9699,13 @@ def _save_admin_list(admins):
 
             os.makedirs(_d, exist_ok=True)
 
-        with open(_ADMIN_LIST_FILE, "w", encoding="utf-8") as _f:
-
-            _json.dump({"admins": _clean}, _f, ensure_ascii=False, indent=2)
+        _atomic_save_json(_ADMIN_LIST_FILE, {"admins": _clean}, indent=2)
 
     except OSError as _e:
 
         return {"ok": False, "error": "写入管理员名单失败: %s" % _e}
 
     return {"ok": True, "admins": _clean}
-
-
-
-
 
 # ============================================================
 
@@ -10261,15 +9735,11 @@ def _save_admin_list(admins):
 
 # ============================================================
 
-
-
 import re
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from urllib.parse import urlparse, parse_qs
-
-
 
 _admin_api_started = False
 
@@ -10279,13 +9749,11 @@ _admin_api_lock = threading.RLock()
 
 _announcements = []  # list of {tag, body, ts}
 
-
-
 # WebSocket 日志（机器人上行/下行事件流）
 
 # 每条形如: {"ts":"2026/08/02 06:00:16","idx":1,"bot":"小流萤","type":"系统",
 
-#            "direction":"system","scene":"-","sender":"-","content":"机器人[未验证-YOUR_APPID...]"}
+#            "direction":"system","scene":"-","sender":"-","content":"机器人[未验证-appid...]"}
 
 _ws_logs = []  # 最多保留 500 条
 
@@ -10293,15 +9761,11 @@ _ws_logs_max = 500
 
 _ws_log_seq = 0  # 序号自增
 
-
-
 # 消息中心专用历史（与 WS 控制台日志相互独立：清空控制台日志不影响消息记录）
 
 _message_logs = []
 
 _message_logs_max = 1000
-
-
 
 # 机器人运行日志（cmd 窗口 stdout/stderr 的实时镜像）
 
@@ -10319,15 +9783,9 @@ _bot_console_lock = threading.Lock()
 
 _console_tee_installed = False
 
-
-
-
-
 class _TeeStream:
 
     """把写入同时转发到真实流（保留 cmd 窗口实时输出）与机器人运行日志缓冲区。"""
-
-
 
     def __init__(self, real_stream):
 
@@ -10336,8 +9794,6 @@ class _TeeStream:
         self._buf = ""
 
         self._lock = threading.Lock()
-
-
 
     def write(self, data):
 
@@ -10379,8 +9835,6 @@ class _TeeStream:
 
             return 0
 
-
-
     def flush(self):
 
         try:
@@ -10391,19 +9845,11 @@ class _TeeStream:
 
             pass
 
-
-
     def __getattr__(self, name):
 
         return getattr(self._real, name)
 
-
-
-
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
 
 # 运行日志级别识别：先按显式标记，再按关键字
 
@@ -10425,10 +9871,6 @@ _LEVEL_WARN_RE = re.compile(
 
 )
 
-
-
-
-
 def _detect_level(line):
 
     if _LEVEL_ERROR_RE.search(line):
@@ -10440,10 +9882,6 @@ def _detect_level(line):
         return "WARN"
 
     return "INFO"
-
-
-
-
 
 def _bot_console_append(line):
 
@@ -10475,15 +9913,9 @@ def _bot_console_append(line):
 
             del _bot_console[: len(_bot_console) - _bot_console_max]
 
-
-
-
-
 def _install_console_tee():
 
     """重定向 sys.stdout/stderr 到 _TeeStream，捕获机器人运行日志。
-
-
 
     同时把已存在的 logging StreamHandler（含 botpy 自带的 logger）重新指向
 
@@ -10525,10 +9957,6 @@ def _install_console_tee():
 
         pass
 
-
-
-
-
 _tee_stdout = None
 
 _tee_stderr = None
@@ -10538,10 +9966,6 @@ _orig_streamhandler_emit = None
 _orig_out_ref = None
 
 _orig_err_ref = None
-
-
-
-
 
 def _repoint_logging_streams(orig_out, orig_err):
 
@@ -10569,10 +9993,6 @@ def _repoint_logging_streams(orig_out, orig_err):
 
                 pass
 
-
-
-
-
 def _patched_streamhandler_emit(self, record):
 
     s = getattr(self, "stream", None)
@@ -10584,10 +10004,6 @@ def _patched_streamhandler_emit(self, record):
         self.stream = _tee_stderr if s in (sys.__stderr__, _orig_err_ref) else _tee_stdout
 
     return _orig_streamhandler_emit(self, record)
-
-
-
-
 
 def _patch_streamhandler_emit(orig_out, orig_err):
 
@@ -10605,21 +10021,11 @@ def _patch_streamhandler_emit(orig_out, orig_err):
 
         logging.StreamHandler.emit._patched = True
 
-
-
-
-
-
-
-
-
 def append_ws_log(bot, type_, direction, scene, sender, content, nickname="", avatar="", to_message=True,
 
                  media_type="", media_url="", group_openid=""):
 
     """追加一条 WebSocket 日志。供 bot.py / console_server.record_message 调用。
-
-
 
     to_message=False 时只写入控制台日志（_ws_logs），不写入消息中心历史（_message_logs），
 
@@ -10689,19 +10095,11 @@ def append_ws_log(bot, type_, direction, scene, sender, content, nickname="", av
 
     return entry
 
-
-
-
-
 # 启动时插入一条占位系统日志（玄机风格：连接状态展示）
 
 append_ws_log("小流萤", "系统", "system", "-", "-",
 
-              "机器人[未验证-YOUR_APPID...]")
-
-
-
-
+              "机器人[未验证-appid...]")
 
 def _classify_message(args, kwargs):
 
@@ -10743,19 +10141,11 @@ def _classify_message(args, kwargs):
 
     return "unknown"
 
-
-
-
-
 # 给 record_message 套一层，累加分类计数
 
 # 同时同步写一条 WebSocket 日志（玄机风格：所有事件都进 WS 日志表）
 
 _orig_record_message = record_message
-
-
-
-
 
 def record_message(*args, **kwargs):
     bot = str(kwargs.get("bot") or "小流萤")
@@ -10908,10 +10298,6 @@ def record_message(*args, **kwargs):
 
     return _orig_record_message(*args, **kwargs)
 
-
-
-
-
 def _today_start_ts():
 
     """返回本地今天 00:00:00 的时间戳（用于按自然日统计活跃）。"""
@@ -10920,15 +10306,9 @@ def _today_start_ts():
 
     return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
 
-
-
-
-
 def _compute_active_counts(bot=None):
 
     """统计「今日」活跃用户数与活跃群聊数（基于成员最后活跃时间）。
-
-
 
     活跃用户：last_seen 落在今天的去重用户（成员表本身按 openid 去重）。
 
@@ -10959,10 +10339,6 @@ def _compute_active_counts(bot=None):
                         active_groups.add(g)
 
     return active_users, len(active_groups)
-
-
-
-
 
 def _merged_per_bot_today():
     """归并「今日」计数器：返回 (appid -> canonical label, appid -> 合并计数器字典)。
@@ -11368,19 +10744,11 @@ def _compute_kpi(bot=""):
 
     return result
 
-
-
-
-
 def _today_date_str():
 
     """返回本地当前日期 YYYY-MM-DD。"""
 
     return time.strftime("%Y-%m-%d", time.localtime())
-
-
-
-
 
 def _load_checkin_data():
     """加载签到数据：物理隔离下合并 data/bots/<appid>/checkin_data.json 与 _shared，
@@ -11413,15 +10781,9 @@ def _load_checkin_data():
             continue
     return merged
 
-
-
-
-
 def _count_today_checkins():
 
     """统计今日/昨日签到人数（来自机器人签到系统 data/checkin_data.json）。
-
-
 
     早期 KPI 里「今日签到」误用 command_count（指令总次数）充当，数值失真；
 
@@ -11467,10 +10829,6 @@ def _count_today_checkins():
 
     return t_cnt, y_cnt
 
-
-
-
-
 def _compute_checkin_stats(bot_filter="", group_filter=""):
 
     """
@@ -11497,8 +10855,6 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
 
     checked_user_keys = set()  # (group, member) 去重
 
-
-
     # 先把成员表按 openid 建立昵称/机器人索引
 
     with _lock:
@@ -11512,8 +10868,6 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
             if oid:
 
                 member_index[oid] = m
-
-
 
     for group_openid, members in data.items():
 
@@ -11539,8 +10893,6 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
 
             points = int(info.get("points") or 0)
 
-
-
             # 按机器人筛选：优先用成员档案中的 bot，未找到则默认"小流萤"
 
             member = member_index.get(member_openid, {})
@@ -11553,23 +10905,17 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
 
                 continue
 
-
-
             checked_today = (last_date == today)
 
             if checked_today:
 
                 checked_user_keys.add((group_openid, member_openid))
 
-
-
             total_continuous += continuous
 
             if continuous > max_continuous:
 
                 max_continuous = continuous
-
-
 
             display_name = nickname or ("用户" + member_openid[:8])
 
@@ -11597,23 +10943,17 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
 
             })
 
-
-
     total_members = len(records)
 
     avg_continuous = round(total_continuous / total_members, 1) if total_members else 0
 
     today_checkins = len(checked_user_keys)
 
-
-
     # 可用筛选项
 
     bots = sorted(set((r["bot"] or "小流萤") for r in records))
 
     groups = sorted(set((r["group_openid"] or "") for r in records if r["group_openid"]))
-
-
 
     return {
 
@@ -11634,10 +10974,6 @@ def _compute_checkin_stats(bot_filter="", group_filter=""):
         "records": records,
 
     }
-
-
-
-
 
 def _update_config_py(appid, secret, event_mode, environment):
 
@@ -11731,10 +11067,6 @@ def _update_config_py(appid, secret, event_mode, environment):
 
         return False, "写入 modules/config.py 失败: %s" % e
 
-
-
-
-
 def _update_config_yaml(appid, secret, event_mode, environment):
 
     """更新 config.yaml 中的机器人凭证与运行配置，保持与 config.py 一致。"""
@@ -11823,15 +11155,9 @@ def _update_config_yaml(appid, secret, event_mode, environment):
 
         return False, "写入 config.yaml 失败: %s" % e
 
-
-
-
-
 # ====== 初始化向导数据存取 ======
 
 _ADMIN_AUTH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "admin_auth.json")
-
-
 
 def _load_admin_auth():
 
@@ -11852,8 +11178,6 @@ def _load_admin_auth():
     except Exception:
 
         return {}
-
-
 
 def _save_admin_auth(payload):
 
@@ -11885,8 +11209,6 @@ def _save_admin_auth(payload):
 
         return False, str(e)
 
-
-
 def _hash_password(pwd):
 
     import hashlib
@@ -11902,6 +11224,91 @@ _CONSOLE_PUBLIC_PATHS = (
     "/api/console/login", "/api/console/logout",
     "/api/health",
 )
+
+
+# ===== 控制台背景音乐 =====
+_MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin", "assets", "music")
+_MUSIC_ALLOWED_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma"}
+_MUSIC_MIME = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+    ".wma": "audio/x-ms-wma",
+}
+
+
+def _safe_music_filename(name):
+    """只保留安全文件名（保留字母数字、中文、空格、点、中划线、下划线），限制长度与扩展名。"""
+    base = os.path.basename(name).strip()
+    if not base:
+        return ""
+    ext = os.path.splitext(base)[1].lower()
+    if ext not in _MUSIC_ALLOWED_EXTS:
+        return ""
+    stem = os.path.splitext(base)[0]
+    stem = re.sub(r'[^\w\u4e00-\u9fff\s\-]', "_", stem)
+    stem = re.sub(r'\s+', " ", stem).strip()
+    stem = stem[:60] or "music"
+    final = stem + ext
+    # 若重名，加序号
+    path = os.path.join(_MUSIC_DIR, final)
+    if not os.path.exists(path):
+        return final
+    idx = 1
+    while idx < 1000:
+        candidate = os.path.join(_MUSIC_DIR, f"{stem} ({idx}){ext}")
+        if not os.path.exists(candidate):
+            return f"{stem} ({idx}){ext}"
+        idx += 1
+    return ""
+
+
+def _list_music_files():
+    try:
+        os.makedirs(_MUSIC_DIR, exist_ok=True)
+    except Exception:
+        pass
+    items = []
+    if not os.path.isdir(_MUSIC_DIR):
+        return items
+    for name in sorted(os.listdir(_MUSIC_DIR)):
+        path = os.path.join(_MUSIC_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in _MUSIC_ALLOWED_EXTS:
+            continue
+        try:
+            st = os.stat(path)
+            items.append({
+                "name": name,
+                "size": st.st_size,
+                "ts": int(st.st_mtime),
+                "url": "/api/music/play/" + name,
+            })
+        except Exception:
+            continue
+    return items
+
+
+def _send_audio_stream(self, fs_path):
+    ext = os.path.splitext(fs_path)[1].lower()
+    mime = _MUSIC_MIME.get(ext, "application/octet-stream")
+    try:
+        with open(fs_path, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+    except Exception as e:
+        self._send_json(500, {"ok": False, "error": "读取音频失败", "detail": str(e)})
 
 
 def _console_token_valid(token):
@@ -11924,23 +11331,52 @@ _CONSOLE_LOGIN_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>小流萤 · 管理后台 · 访问口令</title>
 <style>
-  :root{ --bg:#0f1115; --card:#171a21; --accent:#4f8cff; --ink:#e8ecf3; --ink2:#9aa4b2; --err:#ff6b6b; }
+  :root{ --primary:#5b6cff; --primary-deep:#4453e8; --accent:#8c5cff; --cyan:#59d6ff; --ink:#1f2240; --ink2:#4a4f73; --muted:#8b91b5; --err:#e0566b; --ok:#2bb673; }
   *{box-sizing:border-box;}
-  body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1200px 600px at 50% -10%, #1b2330 0%, var(--bg) 60%);font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;color:var(--ink);}
-  .card{width:340px;background:var(--card);border:1px solid #232a36;border-radius:14px;padding:28px 26px;box-shadow:0 10px 40px rgba(0,0,0,.45);}
-  .logo{font-size:20px;font-weight:700;letter-spacing:.5px;margin-bottom:4px;}
-  .sub{color:var(--ink2);font-size:13px;margin-bottom:22px;}
-  label{display:block;font-size:13px;color:var(--ink2);margin-bottom:8px;}
-  input{width:100%;padding:12px 14px;background:#0f131a;border:1px solid #2a3340;border-radius:10px;color:var(--ink);font-size:16px;letter-spacing:2px;outline:none;}
-  input:focus{border-color:var(--accent);}
-  button{margin-top:18px;width:100%;padding:12px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:15px;font-weight:600;cursor:pointer;}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;color:var(--ink);background:linear-gradient(135deg,#eef0fa 0%,#f3eefb 100%);overflow:hidden;position:relative;}
+  body::before,body::after{content:"";position:absolute;border-radius:50%;filter:blur(70px);opacity:.5;z-index:0;}
+  body::before{width:520px;height:520px;background:radial-gradient(circle,#ae8cff 0%,transparent 70%);top:-180px;left:-140px;}
+  body::after{width:480px;height:480px;background:radial-gradient(circle,#7fe0ff 0%,transparent 70%);bottom:-180px;right:-140px;}
+  .card{position:relative;z-index:1;width:368px;padding:34px 30px;background:rgba(255,255,255,0.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,0.85);border-radius:20px;box-shadow:0 22px 60px rgba(91,108,255,0.18);}
+  .brand{display:flex;align-items:center;gap:11px;margin-bottom:6px;}
+  .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:19px;box-shadow:0 8px 18px rgba(91,108,255,0.35);}
+  .title{font-size:21px;font-weight:800;letter-spacing:.4px;background:linear-gradient(90deg,var(--primary),var(--accent),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .sub{color:var(--ink2);font-size:13px;margin-bottom:24px;}
+  label{display:block;font-size:13px;color:var(--ink2);margin-bottom:8px;font-weight:600;}
+  input{width:100%;padding:13px 15px;background:rgba(255,255,255,0.9);border:1px solid #dfe2f0;border-radius:12px;color:var(--ink);font-size:16px;letter-spacing:2px;outline:none;transition:border-color .2s,box-shadow .2s;}
+  input:focus{border-color:var(--primary);box-shadow:0 0 0 4px rgba(91,108,255,0.12);}
+  button{margin-top:20px;width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 10px 24px rgba(91,108,255,0.3);transition:transform .12s,box-shadow .2s;}
+  button:hover{box-shadow:0 14px 30px rgba(91,108,255,0.42);}
+  button:active{transform:translateY(1px);}
   button:disabled{opacity:.6;cursor:default;}
-  .err{color:var(--err);font-size:13px;min-height:18px;margin-top:12px;}
+  .err{color:var(--err);font-size:13px;min-height:18px;margin-top:12px;text-align:center;font-weight:600;}
 </style>
 </head>
 <body>
+  <div class="ff-halo" aria-hidden="true">
+    <span class="ff-ring r1"></span>
+    <span class="ff-ring r2"></span>
+    <span class="ff-ring r3"></span>
+    <canvas id="ff-orbit-canvas"></canvas>
+  </div>
+  <div class="ff-top" aria-hidden="true"></div>
+  <style>
+  /* 流萤：自底部上升的萤火（第三种设计，区别于初始化页与控制台） */
+  .ff-halo{position:fixed;inset:0;z-index:0;pointer-events:none;display:flex;align-items:center;justify-content:center;}
+  .ff-halo .ff-ring{position:absolute;border-radius:50%;border:1px solid rgba(46,230,170,0.20);}
+  .ff-halo .r1{width:320px;height:320px;animation:ff-ring 6s ease-in-out infinite;}
+  .ff-halo .r2{width:440px;height:440px;animation:ff-ring 8s ease-in-out infinite reverse;}
+  .ff-halo .r3{width:580px;height:580px;animation:ff-ring 10s ease-in-out infinite;}
+  .ff-halo canvas{position:absolute;width:100%;height:100%;display:block;}
+  @keyframes ff-ring{0%,100%{transform:scale(1);opacity:.45;}50%{transform:scale(1.06);opacity:.85;}}
+  .ff-top{position:fixed;left:0;right:0;top:0;height:150px;background:linear-gradient(to bottom, rgba(46,230,170,0.12) 0%, rgba(46,230,170,0.04) 40%, transparent 100%);pointer-events:none;z-index:0;}
+  @media (prefers-reduced-motion: reduce){ .ff-halo .ff-ring{animation:none !important;} .ff-orbit-canvas{display:none !important;} }
+  </style>
   <div class="card">
-    <div class="logo">小流萤 管理后台</div>
+    <div class="brand">
+      <div class="logo">萤</div>
+      <div class="title">小流萤 管理后台</div>
+    </div>
     <div class="sub">请输入访问口令以进入控制台</div>
     <label for="pw">访问口令</label>
     <input id="pw" type="password" inputmode="numeric" autocomplete="off" placeholder="访问口令" maxlength="64"/>
@@ -11971,14 +11407,58 @@ _CONSOLE_LOGIN_HTML = """<!DOCTYPE html>
     document.getElementById('pw').addEventListener('keydown', function(e){ if(e.key==='Enter') login(); });
     document.getElementById('pw').focus();
   </script>
+  <script>
+  /* 登录/设口令页 · 流萤卡片光晕（第三种设计：同心圆环 + 轨道萤光，区别于前面两种） */
+  (function(){
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var canvas = document.getElementById('ff-orbit-canvas');
+    if(!canvas || reduce) return;
+    var ctx = canvas.getContext('2d');
+    var W=0,H=0,dpr=Math.min(window.devicePixelRatio||1,2);
+    function resize(){ W=window.innerWidth; H=window.innerHeight; canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); }
+    resize(); window.addEventListener('resize',resize);
+    var COL=['46,230,170','170,255,215','22,200,140'];
+    var N=10;
+    var dots=[];
+    for(var i=0;i<N;i++){
+      dots.push({
+        a:(Math.PI*2/N)*i + Math.random()*0.3,
+        rad:180 + Math.random()*150,
+        sp:0.12 + Math.random()*0.18,
+        dir:Math.random()<0.5?1:-1,
+        r:1.4 + Math.random()*2.2,
+        ph:Math.random()*Math.PI*2,
+        sp2:0.6 + Math.random()*1.0,
+        col:COL[i % COL.length]
+      });
+    }
+    var last=0, frame=33;
+    function draw(t){
+      if(t-last<frame){ requestAnimationFrame(draw); return; }
+      last=t; ctx.clearRect(0,0,W,H);
+      var cx=W/2, cy=H/2;
+      for(var i=0;i<dots.length;i++){
+        var d=dots[i];
+        d.a += d.sp*d.dir*0.01;
+        d.ph += 0.012*d.sp2;
+        var rr = d.rad + Math.sin(d.ph)*14;
+        var x = cx + Math.cos(d.a)*rr;
+        var y = cy + Math.sin(d.a)*rr;
+        var tw = 0.3 + 0.5*(0.5+0.5*Math.sin(d.ph*1.6));
+        var g=ctx.createRadialGradient(x,y,0,x,y,d.r*5);
+        g.addColorStop(0,'rgba('+d.col+','+tw.toFixed(3)+')');
+        g.addColorStop(1,'rgba('+d.col+',0)');
+        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,d.r*5,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba('+d.col+','+Math.min(1,tw+0.16).toFixed(3)+')';
+        ctx.beginPath(); ctx.arc(x,y,d.r*0.6,0,Math.PI*2); ctx.fill();
+      }
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+  })();
+  </script>
 </body>
 </html>"""
-
-
-
-
-
-
 
 _CONSOLE_SETPASS_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -11987,25 +11467,54 @@ _CONSOLE_SETPASS_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>小流萤 · 管理后台 · 设置访问口令</title>
 <style>
-  :root{ --bg:#0f1115; --card:#171a21; --accent:#4f8cff; --ink:#e8ecf3; --ink2:#9aa4b2; --err:#ff6b6b; }
+  :root{ --primary:#5b6cff; --primary-deep:#4453e8; --accent:#8c5cff; --cyan:#59d6ff; --ink:#1f2240; --ink2:#4a4f73; --muted:#8b91b5; --err:#e0566b; --ok:#2bb673; }
   *{box-sizing:border-box;}
-  body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1200px 600px at 50% -10%, #1b2330 0%, var(--bg) 60%);font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;color:var(--ink);}
-  .card{width:360px;background:var(--card);border:1px solid #232a36;border-radius:14px;padding:28px 26px;box-shadow:0 10px 40px rgba(0,0,0,.45);}
-  .logo{font-size:20px;font-weight:700;letter-spacing:.5px;margin-bottom:4px;}
-  .sub{color:var(--ink2);font-size:13px;margin-bottom:22px;}
-  label{display:block;font-size:13px;color:var(--ink2);margin-bottom:8px;}
-  input{width:100%;padding:12px 14px;background:#0f131a;border:1px solid #2a3340;border-radius:10px;color:var(--ink);font-size:16px;letter-spacing:2px;outline:none;}
-  input:focus{border-color:var(--accent);}
-  button{margin-top:18px;width:100%;padding:12px;border:none;border-radius:10px;background:var(--accent);color:#fff;font-size:15px;font-weight:600;cursor:pointer;}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;color:var(--ink);background:linear-gradient(135deg,#eef0fa 0%,#f3eefb 100%);overflow:hidden;position:relative;}
+  body::before,body::after{content:"";position:absolute;border-radius:50%;filter:blur(70px);opacity:.5;z-index:0;}
+  body::before{width:520px;height:520px;background:radial-gradient(circle,#ae8cff 0%,transparent 70%);top:-180px;left:-140px;}
+  body::after{width:480px;height:480px;background:radial-gradient(circle,#7fe0ff 0%,transparent 70%);bottom:-180px;right:-140px;}
+  .card{position:relative;z-index:1;width:380px;padding:34px 30px;background:rgba(255,255,255,0.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid rgba(255,255,255,0.85);border-radius:20px;box-shadow:0 22px 60px rgba(91,108,255,0.18);}
+  .brand{display:flex;align-items:center;gap:11px;margin-bottom:6px;}
+  .logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,var(--primary),var(--accent));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:19px;box-shadow:0 8px 18px rgba(91,108,255,0.35);}
+  .title{font-size:21px;font-weight:800;letter-spacing:.4px;background:linear-gradient(90deg,var(--primary),var(--accent),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .sub{color:var(--ink2);font-size:13px;margin-bottom:24px;}
+  label{display:block;font-size:13px;color:var(--ink2);margin-bottom:8px;font-weight:600;}
+  input{width:100%;padding:13px 15px;background:rgba(255,255,255,0.9);border:1px solid #dfe2f0;border-radius:12px;color:var(--ink);font-size:16px;letter-spacing:2px;outline:none;transition:border-color .2s,box-shadow .2s;}
+  input:focus{border-color:var(--primary);box-shadow:0 0 0 4px rgba(91,108,255,0.12);}
+  button{margin-top:20px;width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--primary),var(--accent));color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 10px 24px rgba(91,108,255,0.3);transition:transform .12s,box-shadow .2s;}
+  button:hover{box-shadow:0 14px 30px rgba(91,108,255,0.42);}
+  button:active{transform:translateY(1px);}
   button:disabled{opacity:.6;cursor:default;}
-  .err{color:var(--err);font-size:13px;min-height:18px;margin-top:12px;}
+  .err{color:var(--err);font-size:13px;min-height:18px;margin-top:12px;text-align:center;font-weight:600;}
 </style>
 </head>
 <body>
+  <div class="ff-halo" aria-hidden="true">
+    <span class="ff-ring r1"></span>
+    <span class="ff-ring r2"></span>
+    <span class="ff-ring r3"></span>
+    <canvas id="ff-orbit-canvas"></canvas>
+  </div>
+  <div class="ff-top" aria-hidden="true"></div>
+  <style>
+  /* 流萤：自底部上升的萤火（第三种设计，区别于初始化页与控制台） */
+  .ff-halo{position:fixed;inset:0;z-index:0;pointer-events:none;display:flex;align-items:center;justify-content:center;}
+  .ff-halo .ff-ring{position:absolute;border-radius:50%;border:1px solid rgba(46,230,170,0.20);}
+  .ff-halo .r1{width:320px;height:320px;animation:ff-ring 6s ease-in-out infinite;}
+  .ff-halo .r2{width:440px;height:440px;animation:ff-ring 8s ease-in-out infinite reverse;}
+  .ff-halo .r3{width:580px;height:580px;animation:ff-ring 10s ease-in-out infinite;}
+  .ff-halo canvas{position:absolute;width:100%;height:100%;display:block;}
+  @keyframes ff-ring{0%,100%{transform:scale(1);opacity:.45;}50%{transform:scale(1.06);opacity:.85;}}
+  .ff-top{position:fixed;left:0;right:0;top:0;height:150px;background:linear-gradient(to bottom, rgba(46,230,170,0.12) 0%, rgba(46,230,170,0.04) 40%, transparent 100%);pointer-events:none;z-index:0;}
+  @media (prefers-reduced-motion: reduce){ .ff-halo .ff-ring{animation:none !important;} .ff-orbit-canvas{display:none !important;} }
+  </style>
   <div class="card">
-    <div class="logo">小流萤 管理后台</div>
+    <div class="brand">
+      <div class="logo">萤</div>
+      <div class="title">小流萤 管理后台</div>
+    </div>
     <div class="sub">检测到尚未设置访问口令，请先设置后再进入</div>
-    <label for="pw">设置访问口令（至少 6 位）</label>
+    <label for="pw">设置访问口令（6 位数字）</label>
     <input id="pw" type="password" inputmode="numeric" autocomplete="off" placeholder="访问口令" maxlength="64"/>
     <label for="pw2">确认访问口令</label>
     <input id="pw2" type="password" inputmode="numeric" autocomplete="off" placeholder="再次输入" maxlength="64"/>
@@ -12026,7 +11535,7 @@ _CONSOLE_SETPASS_HTML = """<!DOCTYPE html>
         .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
         .then(function(res){
           if(res.ok && res.j && res.j.ok){
-            err.style.color = '#6cd49a'; err.textContent = '口令已设置，正在进入…';
+            err.style.color = '#2bb673'; err.textContent = '口令已设置，正在进入…';
             fetch('/api/console/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:pw})})
               .then(function(r2){ return r2.json().then(function(j2){ return {ok:r2.ok, j:j2}; }); })
               .then(function(res2){ window.location.replace('/admin/index.html'); })
@@ -12042,6 +11551,56 @@ _CONSOLE_SETPASS_HTML = """<!DOCTYPE html>
     document.getElementById('pw2').addEventListener('keydown', function(e){ if(e.key==='Enter') setpass(); });
     document.getElementById('pw').focus();
   </script>
+  <script>
+  /* 登录/设口令页 · 流萤卡片光晕（第三种设计：同心圆环 + 轨道萤光，区别于前面两种） */
+  (function(){
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var canvas = document.getElementById('ff-orbit-canvas');
+    if(!canvas || reduce) return;
+    var ctx = canvas.getContext('2d');
+    var W=0,H=0,dpr=Math.min(window.devicePixelRatio||1,2);
+    function resize(){ W=window.innerWidth; H=window.innerHeight; canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); }
+    resize(); window.addEventListener('resize',resize);
+    var COL=['46,230,170','170,255,215','22,200,140'];
+    var N=10;
+    var dots=[];
+    for(var i=0;i<N;i++){
+      dots.push({
+        a:(Math.PI*2/N)*i + Math.random()*0.3,
+        rad:180 + Math.random()*150,
+        sp:0.12 + Math.random()*0.18,
+        dir:Math.random()<0.5?1:-1,
+        r:1.4 + Math.random()*2.2,
+        ph:Math.random()*Math.PI*2,
+        sp2:0.6 + Math.random()*1.0,
+        col:COL[i % COL.length]
+      });
+    }
+    var last=0, frame=33;
+    function draw(t){
+      if(t-last<frame){ requestAnimationFrame(draw); return; }
+      last=t; ctx.clearRect(0,0,W,H);
+      var cx=W/2, cy=H/2;
+      for(var i=0;i<dots.length;i++){
+        var d=dots[i];
+        d.a += d.sp*d.dir*0.01;
+        d.ph += 0.012*d.sp2;
+        var rr = d.rad + Math.sin(d.ph)*14;
+        var x = cx + Math.cos(d.a)*rr;
+        var y = cy + Math.sin(d.a)*rr;
+        var tw = 0.3 + 0.5*(0.5+0.5*Math.sin(d.ph*1.6));
+        var g=ctx.createRadialGradient(x,y,0,x,y,d.r*5);
+        g.addColorStop(0,'rgba('+d.col+','+tw.toFixed(3)+')');
+        g.addColorStop(1,'rgba('+d.col+',0)');
+        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,d.r*5,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba('+d.col+','+Math.min(1,tw+0.16).toFixed(3)+')';
+        ctx.beginPath(); ctx.arc(x,y,d.r*0.6,0,Math.PI*2); ctx.fill();
+      }
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+  })();
+  </script>
 </body>
 </html>"""
 
@@ -12049,8 +11608,6 @@ _CONSOLE_SETPASS_HTML = """<!DOCTYPE html>
 class _AdminAPIHandler(BaseHTTPRequestHandler):
 
     server_version = "XiaoLiuyingAdminAPI/1.0"
-
-
 
     def _send_json(self, code, payload, extra_headers=None):
 
@@ -12092,8 +11649,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             raise
 
-
-
     def _send_text(self, code, text, content_type="text/plain; charset=utf-8"):
 
         body = text.encode("utf-8")
@@ -12124,13 +11679,9 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             raise
 
-
-
     def log_message(self, format, *args):
 
         return  # 静默
-
-
 
     def do_OPTIONS(self):
 
@@ -12143,8 +11694,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
         self.end_headers()
-
-
 
     def _console_token_from_request(self):
         auth = self.headers.get("Authorization") or ""
@@ -12281,6 +11830,41 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             })
 
+        elif path == "/api/console/password-status":
+            # 供控制台「修改访问口令」弹窗判断：是否已设置访问口令。
+            auth = _load_admin_auth()
+            self._send_json(200, {
+                "ok": True,
+                "set": bool(auth.get("password_hash")),
+                "set_at": str(auth.get("password_set_at") or ""),
+            })
+
+        elif path == "/api/music/list":
+            self._send_json(200, {"ok": True, "items": _list_music_files(), "cover": "/admin/assets/music/cover.png"})
+
+        elif path.startswith("/api/music/play/"):
+            name = path[len("/api/music/play/"):]
+            try:
+                from urllib.parse import unquote
+                name = unquote(name)
+            except Exception:
+                pass
+            name = os.path.basename(name)
+            if not name:
+                self._send_json(400, {"ok": False, "error": "缺少文件名"})
+                return
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in _MUSIC_ALLOWED_EXTS:
+                self._send_json(403, {"ok": False, "error": "不支持的音频格式"})
+                return
+            fs_path = os.path.join(_MUSIC_DIR, name)
+            fs_path = os.path.normpath(fs_path)
+            bot_dir = os.path.dirname(os.path.abspath(__file__))
+            if not fs_path.startswith(_MUSIC_DIR) or not os.path.isfile(fs_path):
+                self._send_json(404, {"ok": False, "error": "文件不存在"})
+                return
+            _send_audio_stream(self, fs_path)
+
         elif path == "/api/health":
 
             try:
@@ -12332,6 +11916,35 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 "id": _rid,
                 "keys": _keys,
                 "overrides": _overrides,
+        })
+
+        elif path == "/api/admin/brand":
+            # 管理台品牌信息（侧边栏 logo + 标题），独立于 runtime_settings
+            # 存放在 data/admin_brand.json（base64 图可能很大）
+            try:
+                _brand = _load_admin_brand()
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "error": "读取品牌信息失败: %s" % _e})
+                return
+            self._send_json(200, {
+                "ok": True,
+                "title": _brand.get("title") or "小流萤管理后台",
+                "logo": _brand.get("logo") or "",            # base64 data URL 或 空字符串
+                "logo_updated_at": _brand.get("logo_updated_at") or 0,
+            })
+
+        elif path == "/api/admin/music-fm":
+            # 流萤FM 音乐面板自定义：标题/副标题/唱片封面
+            try:
+                _fm = _load_music_fm()
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "error": "读取失败: %s" % _e})
+                return
+            self._send_json(200, {
+                "ok": True,
+                "title": _fm.get("title") or "流萤FM",
+                "subtitle": _fm.get("subtitle") or "与流萤一起走在路上",
+                "cover": _fm.get("cover") or "/admin/assets/music/cover.png",
             })
 
         elif path == "/api/bots":
@@ -13993,26 +13606,32 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **stats})
 
         elif path == "/api/plugins":
-            # 列出当前注册表中的所有插件（内置 + 外置），标注 is_external 供前端区分
+            # 列出当前注册表中的所有插件（内置 + 外置），附带 system_enabled（系统总开关）
             try:
-                _plugs = plugin_registry.get_all_plugins()
-                _data = [
-                    {
-                        "key": d.key,
-                        "name": d.name,
-                        "priority": d.priority,
-                        "is_external": d.is_external,
-                        "description": d.description,
-                        "category": getattr(d, "category", ""),
-                        "enabled_by_default": d.enabled_by_default,
-                        "enabled": plugin_registry.is_plugin_enabled(d.key),
-                    }
-                    for d in _plugs
-                ]
+                _data = plugin_center.list_installed_plugins()
+                _load_errors = plugin_registry.get_external_load_errors() if hasattr(plugin_registry, "get_external_load_errors") else {}
             except Exception as _e:
                 self._send_json(500, {"ok": False, "error": str(_e)})
                 return
-            self._send_json(200, {"ok": True, "plugins": _data, "count": len(_data)})
+            self._send_json(200, {
+                "ok": True,
+                "plugins": _data,
+                "count": len(_data),
+                "load_errors": _load_errors,
+            })
+
+        elif path == "/api/plugins/by-category":
+            # 按 category 分组返回已装插件（前端按大类聚合显示用）
+            try:
+                _by_cat = plugin_center.plugins_by_category()
+                self._send_json(200, {
+                    "ok": True,
+                    "by_category": _by_cat,
+                    "count": sum(len(v) for v in _by_cat.values()),
+                })
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+            return
 
 
         elif path == "/api/plugins/market":
@@ -14020,22 +13639,131 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
             # 内置测试插件单独作为 builtin_test 返回，不进入仓库目录。
             try:
                 _q = parse_qs(u.query)
-                _remote = _q.get("remote", ["1"])[0] in ("1", "true", "True")  # 默认拉远程
                 _force = _q.get("force", ["0"])[0] in ("1", "true", "True")
-                _repo_url = get_runtime_setting_effective("plugin.market.repo_url")
-                plugin_registry.set_remote_market_base(_repo_url)
-                _local = plugin_registry.get_market_catalog()  # 内置测试插件（不在仓库）
-                _remote_catalog = plugin_registry.get_remote_market_catalog(force_refresh=_force) if _remote else None
+                _payload = plugin_center.get_market_payload(force_remote=_force)
+                # 保持向后兼容：旧前端读 catalog / builtin_test / repo_url / remote_source / remote_error
+                _payload["remote_source"] = _payload.get("source")
+                _err = _payload.get("error")
+                _payload["remote_error"] = _err.get("message") if _err else None
+                _payload["error_code"] = _err.get("code") if _err else None
+                _payload["error_hint"] = _err.get("hint") if _err else None
+                self._send_json(200, _payload)
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/plugins/market/repo":
+            # 返回当前生效与默认的仓库配置（前端「运行设置」展示 + 重置按钮）
+            try:
+                self._send_json(200, plugin_center.get_repo_info())
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/feature-menu":
+            # 读功能菜单配置（用于控制台编辑页）
+            try:
+                menu = feature_menu.load_menu(force=True)
+                ctx = {
+                    "is_group": True,
+                    "checkin_on": True, "video_on": True, "music_on": True,
+                    "image_on": True, "game_on": True, "tools_on": True,
+                    "study_on": True, "novel_on": True, "group_admin_on": True,
+                    "feedback_enabled": True, "experience_group_enabled": True,
+                    "feedback.form_url": "https://docs.qq.com/form/example",
+                    "experience_group.url": "https://qun.qq.com/example",
+                }
                 self._send_json(200, {
                     "ok": True,
-                    "catalog": (_remote_catalog.get("plugins") if _remote_catalog else []),
-                    "builtin_test": _local,
-                    "repo_url": plugin_registry.get_remote_market_base(),
-                    "remote_source": (_remote_catalog.get("source") if _remote_catalog else None),
-                    "remote_error": (_remote_catalog.get("error") if _remote_catalog and not _remote_catalog.get("ok") else None),
+                    "menu": menu,
+                    "ctx": ctx,
+                    "preview_keyboard": feature_menu.build_keyboard(menu, ctx),
                 })
             except Exception as _e:
-                self._send_json(500, {"ok": False, "error": str(_e)})
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/feature-menu/reset":
+            # 恢复默认
+            try:
+                ok, msg = feature_menu.reset_menu()
+                self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/submenus":
+            # 读二级菜单配置（兼容旧版：自动从菜单树取 root.children）
+            try:
+                data = feature_menu.load_submenus(force=True)
+                self._send_json(200, {"ok": True, "submenus": data})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/submenus/reset":
+            # 恢复默认二级菜单（实际恢复整个菜单树）
+            try:
+                ok, msg = feature_menu.reset_submenus()
+                self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/menu/tree":
+            # 读交互菜单树（任意层级）
+            try:
+                tree = feature_menu.load_tree(force=True)
+                ctx = {
+                    "is_group": True,
+                    "checkin_on": True, "video_on": True, "music_on": True,
+                    "image_on": True, "game_on": True, "tools_on": True,
+                    "study_on": True, "novel_on": True, "group_admin_on": True,
+                    "feedback_enabled": True, "experience_group_enabled": True,
+                    "feedback.form_url": "https://docs.qq.com/form/example",
+                    "experience_group.url": "https://qun.qq.com/example",
+                }
+                self._send_json(200, {
+                    "ok": True,
+                    "tree": tree,
+                    "ctx": ctx,
+                    "paths": feature_menu.list_all_paths(),
+                })
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/menu/tree/reset":
+            # 恢复默认菜单树
+            try:
+                ok, msg = feature_menu.reset_tree()
+                self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
+        elif path == "/api/menu/tree/debug":
+            # 调试：直接展示原始 yaml 内容 + 解析后的结构（不缓存）
+            try:
+                import os as _os
+                import json as _json
+                raw_text = ""
+                if _os.path.isfile(feature_menu._TREE_FILE):
+                    with open(feature_menu._TREE_FILE, "r", encoding="utf-8") as _f:
+                        raw_text = _f.read()
+                # 兜底避免 NoneType
+                try:
+                    raw_parsed = feature_menu._mini_yaml_load(raw_text) if raw_text.strip() else {}
+                except Exception as _parse_e:
+                    raw_parsed = {"_parse_error": str(_parse_e)}
+                # dump 时 JSON 不支持 set / tuple —— 全部转 list
+                def _safe(v):
+                    try:
+                        _json.dumps(v)
+                        return v
+                    except Exception:
+                        return repr(v)
+                self._send_json(200, {
+                    "ok": True,
+                    "file": feature_menu._TREE_FILE,
+                    "file_exists": _os.path.isfile(feature_menu._TREE_FILE),
+                    "raw_text_len": len(raw_text),
+                    "raw_first_200": raw_text[:200],
+                    "raw_last_200": raw_text[-200:],
+                    "raw_parsed_type": type(raw_parsed).__name__,
+                    "raw_parsed_value": _safe(raw_parsed),
+                    "raw_parsed_root_type": type(raw_parsed.get("root", None)).__name__ if isinstance(raw_parsed, dict) else None,
+                    "raw_parsed_root_value": _safe(raw_parsed.get("root", None)) if isinstance(raw_parsed, dict) else None,
+                    "raw_root_banner": (raw_parsed.get("root", {}) or {}).get("banner") if isinstance(raw_parsed, dict) else None,
+                    "raw_root_children_count": len((raw_parsed.get("root", {}) or {}).get("children") or {}) if isinstance(raw_parsed, dict) and isinstance(raw_parsed.get("root"), dict) else None,
+                })
+            except Exception as _e:
+                import traceback as _tb
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e), "trace": _tb.format_exc()})
         elif path == "/api/feature-config":
 
             q = parse_qs(u.query)
@@ -14392,6 +14120,49 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             self.end_headers()
 
+        elif path == "/api/plugins/config":
+            # 读取外置插件的自定义配置（GET）
+            _q = urllib.parse.urlparse(self.path).query
+            _qs = urllib.parse.parse_qs(_q)
+            _key = (_qs.get("key") or [""])[0].strip()
+            if not _key:
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key"})
+                return
+            try:
+                r = plugin_center.get_plugin_config(_key)
+            except Exception as _e:
+                logger.exception("读取插件配置失败")
+                self._send_json(500, {"ok": False, "error": "读取失败：%s" % _e})
+                return
+            self._send_json(200, r)
+            return
+
+        elif path == "/api/plugins/meta":
+            # 插件基础信息（_meta）：GET 部分
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query or "")
+            want_all = qs.get("all", ["0"])[0] in ("1", "true", "yes")
+            if want_all:
+                try:
+                    data = plugin_center.get_all_plugin_metas()
+                    self._send_json(200, {"ok": True, "metas": data})
+                except Exception as _e:
+                    logger.exception("读取所有插件 meta 失败")
+                    self._send_json(500, {"ok": False, "error": "%s" % _e})
+                return
+            _key = (qs.get("key", [""])[0] or "").strip()
+            if not _key:
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key"})
+                return
+            try:
+                r = plugin_center.get_plugin_meta(_key)
+            except Exception as _e:
+                logger.exception("读取插件 meta 失败")
+                self._send_json(500, {"ok": False, "error": "%s" % _e})
+                return
+            status = 200 if r.get("ok") else 400
+            self._send_json(status, r)
+            return
+
         elif path == "/favicon.ico":
             # 浏览器自动请求 favicon，返回 204 避免 404 控制台噪声（所有管理页通用）
             self.send_response(204)
@@ -14404,8 +14175,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
             # 静态文件服务：admin/ 目录
 
             self._serve_static(path)
-
-
 
     def _serve_static(self, path):
 
@@ -14549,8 +14318,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             self._send_json(500, {"error": "read_failed", "detail": str(e)})
 
-
-
     def do_POST(self):
 
         u = urlparse(self.path)
@@ -14559,6 +14326,20 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
         _gate = self._console_auth_required(path)
         if _gate:
+            return
+
+        if path == "/api/plugins/market/repo/update":
+            # 更新运行时仓库基址 + 子目录（不落盘，bot 重启后回退到 config.yaml 默认）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                _body = _json.loads(raw.decode("utf-8", errors="replace") or "{}")
+                _url = (_body.get("repo_url") or "").strip()
+                _subdir = (_body.get("subdir") or "").strip()
+                plugin_registry.set_remote_market_base(_url, subdir=_subdir or None)
+                self._send_json(200, plugin_center.get_repo_info())
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
             return
 
         if path == "/api/announcement":
@@ -14859,6 +14640,100 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "message": "访问口令已设置"})
             return
 
+        elif path == "/api/console/change-password":
+            # 修改访问口令：需已登录 + 校验当前口令 + 新口令 6 位纯数字；
+            # 成功后清空所有会话令牌并请求整机重启，强制使用新口令重新登录。
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            cur = str(payload.get("current_password") or "").strip()
+            new = str(payload.get("new_password") or "").strip()
+            confirm = str(payload.get("confirm") or "").strip()
+            _auth = _load_admin_auth()
+            if not _auth.get("password_hash"):
+                self._send_json(403, {"ok": False, "error": "尚未设置访问口令，请先设置访问口令"})
+                return
+            if not cur:
+                self._send_json(400, {"ok": False, "error": "请输入当前访问口令"})
+                return
+            if _hash_password(cur) != _auth["password_hash"]:
+                self._send_json(401, {"ok": False, "error": "当前访问口令错误"})
+                return
+            if not re.fullmatch(r"\d{6}", new):
+                self._send_json(400, {"ok": False, "error": "新访问口令须为 6 位数字"})
+                return
+            if new != confirm:
+                self._send_json(400, {"ok": False, "error": "两次输入的新访问口令不一致"})
+                return
+            _auth["password_hash"] = _hash_password(new)
+            _auth["password_set_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            if not _save_admin_auth(_auth):
+                self._send_json(500, {"ok": False, "error": "保存失败"})
+                return
+            # 清空内存会话令牌（重启后亦会清空），强制所有用户重新登录
+            with _CONSOLE_SESSIONS_LOCK:
+                _CONSOLE_SESSIONS.clear()
+            # 请求整机重启：看门狗会在 _PENDING_DELAY 秒后真正重启，
+            # 重启后内存令牌清空，用户必须输入新口令才能进入控制台。
+            _restart_bot()
+            self._send_json(200, {"ok": True, "message": "访问口令已修改，机器人即将重启，请稍后用新口令登录", "restart": True})
+            return
+
+        elif path == "/api/music/upload":
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            filename = str(payload.get("filename") or "").strip()
+            data = payload.get("data") or ""
+            if not filename or not data:
+                self._send_json(400, {"ok": False, "error": "缺少文件名或音频数据"})
+                return
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in _MUSIC_ALLOWED_EXTS:
+                self._send_json(400, {"ok": False, "error": "仅支持上传 %s 格式的音频" % ", ".join(sorted(_MUSIC_ALLOWED_EXTS))})
+                return
+            try:
+                os.makedirs(_MUSIC_DIR, exist_ok=True)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": "创建音乐目录失败", "detail": str(e)})
+                return
+            safe_name = _safe_music_filename(filename)
+            if not safe_name:
+                self._send_json(400, {"ok": False, "error": "文件名不合法"})
+                return
+            try:
+                if isinstance(data, str) and "," in data:
+                    b64 = data.split(",", 1)[1]
+                else:
+                    b64 = data
+                file_bytes = base64.b64decode(b64)
+            except Exception as e:
+                self._send_json(400, {"ok": False, "error": "音频数据解码失败", "detail": str(e)})
+                return
+            try:
+                save_path = os.path.join(_MUSIC_DIR, safe_name)
+                with open(save_path, "wb") as f:
+                    f.write(file_bytes)
+            except Exception as e:
+                self._send_json(500, {"ok": False, "error": "保存音频失败", "detail": str(e)})
+                return
+            self._send_json(200, {
+                "ok": True,
+                "message": "上传成功",
+                "item": {
+                    "name": safe_name,
+                    "size": len(file_bytes),
+                    "url": "/api/music/play/" + safe_name,
+                },
+            })
+            return
+
         elif path in ("/api/bots", "/api/bots/add", "/api/bots/update"):
 
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -14955,29 +14830,120 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "message": "已保存，热重载失败：%s" % _e})
 
         elif path == "/api/plugins/set-enabled":
-            # 设置外置插件启用/禁用（仅停止分发，保留在注册表/管理页，状态持久化）
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            # 切换插件启用状态。body: {key, enabled, kind?}
+            # kind=system: 写系统总开关（_system_switches，bot 主代码生效），并自动联动 _EXTERNAL_ENABLED
+            # kind=plugin: 只写插件级开关（仅外置 _EXTERNAL_ENABLED）
+            # 默认 all: 两个都写（兼容旧调用）
             try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
                 payload = _json.loads(raw) if raw else {}
             except Exception:
                 payload = {}
-            pkey = str(payload.get("key") or "").strip()
-            penabled = bool(payload.get("enabled", False))
-            if not pkey:
-                self._send_json(400, {"ok": False, "error": "key 不能为空"})
+            key = (payload.get("key") or "").strip()
+            enabled = bool(payload.get("enabled", True))
+            kind = (payload.get("kind") or "all").strip()
+            if not key:
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key"})
                 return
-            # 仅允许对外置插件做启停；内置插件受 is_feature_enabled 控制，不走此处
-            _desc = plugin_registry.get_plugin(pkey)
-            if _desc is None or not _desc.is_external:
-                self._send_json(400, {"ok": False, "error": "该插件不是可管理的外置插件：%s" % pkey})
+            r = plugin_center.set_enabled(key, enabled, kind=kind)
+            status = 200 if r.get("ok") else 400
+            self._send_json(status, r)
+
+        elif path == "/api/plugins/config":
+            # 保存外置插件的自定义配置（POST）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            _key = (payload.get("key") or "").strip()
+            _values = payload.get("values") or {}
+            if not _key:
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key"})
                 return
-            plugin_registry.set_plugin_enabled(pkey, penabled)
-            self._send_json(200, {
-                "ok": True,
-                "message": "已" + ("启用" if penabled else "禁用") + "外置插件 %s（仅停止分发，状态已保存）" % pkey,
-                "key": pkey, "enabled": penabled,
-            })
+            if not isinstance(_values, dict):
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "values 必须是 dict"})
+                return
+            try:
+                r = plugin_center.save_plugin_config(_key, _values)
+            except Exception as _e:
+                logger.exception("保存插件配置失败")
+                self._send_json(500, {"ok": False, "error": "保存失败：%s" % _e})
+                return
+            status = 200 if r.get("ok") else 400
+            self._send_json(status, r)
+
+        elif path == "/api/plugins/meta":
+            # 插件基础信息（_meta）：POST 保存（GET 路由在 do_GET 里）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            _key = (payload.get("key") or "").strip()
+            _meta = payload.get("meta") or {}
+            if not _key:
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key"})
+                return
+            if not isinstance(_meta, dict):
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "meta 必须是 dict"})
+                return
+            try:
+                r = plugin_center.save_plugin_meta(_key, _meta)
+            except Exception as _e:
+                logger.exception("保存插件 meta 失败")
+                self._send_json(500, {"ok": False, "error": "%s" % _e})
+                return
+            status = 200 if r.get("ok") else 400
+            self._send_json(status, r)
+
+        elif path == "/api/feature-menu":
+            # 保存功能菜单配置（POST）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            menu = payload.get("menu")
+            if not isinstance(menu, dict):
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 menu 对象"})
+                return
+            ok, msg = feature_menu.save_menu(menu)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+
+        elif path == "/api/submenus":
+            # 保存二级菜单配置（POST，兼容旧版：内部会写入菜单树）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            data = payload.get("submenus")
+            if not isinstance(data, dict):
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 submenus 对象"})
+                return
+            ok, msg = feature_menu.save_submenus(data)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
+
+        elif path == "/api/menu/tree":
+            # 保存交互菜单树（任意层级）
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+                payload = _json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            tree = payload.get("tree")
+            if not isinstance(tree, dict):
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 tree 对象"})
+                return
+            ok, msg = feature_menu.save_tree(tree)
+            self._send_json(200 if ok else 500, {"ok": ok, "message": msg})
 
         elif path == "/api/bots/delete":
 
@@ -15056,20 +15022,17 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 payload = {}
             _key = str(payload.get("key") or "").strip()
             if not _key:
-                self._send_json(400, {"ok": False, "error": "缺少 key 参数"})
+                self._send_json(400, {"ok": False, "code": "bad_request", "error": "缺少 key 参数"})
                 return
             try:
                 if path == "/api/plugins/market/install":
                     _raw_url = str(payload.get("raw_url") or "").strip()
-                    if _raw_url:
-                        _res = plugin_registry.install_remote_market_plugin(_key, raw_url=_raw_url)
-                    else:
-                        _res = plugin_registry.install_market_plugin(_key)
+                    _res = plugin_center.install_plugin(_key, _raw_url or None)
                 else:
-                    _res = plugin_registry.uninstall_external_plugin(_key)
+                    _res = plugin_center.uninstall_plugin(_key)
             except Exception as _e:
                 logger.exception("%s 失败" % path)
-                self._send_json(500, {"ok": False, "error": str(_e)})
+                self._send_json(500, {"ok": False, "code": "backend_error", "error": str(_e)})
                 return
             if not _res.get("ok"):
                 self._send_json(400, _res)
@@ -15764,6 +15727,70 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 logger.exception("/api/group/admin-groups 失败")
                 self._send_json(500, {"ok": False, "error": str(_e)})
 
+        elif path == "/api/admin/brand":
+            # 保存/重置管理台品牌信息
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                _payload = _json.loads(raw) if raw else {}
+            except Exception:
+                _payload = {}
+            _action = str(_payload.get("action") or "save").strip()
+            try:
+                if _action == "reset":
+                    _ok, _err = _save_admin_brand({"title": "小流萤管理后台", "logo": ""}, reset=True)
+                else:
+                    _title = str(_payload.get("title") or "小流萤管理后台").strip()
+                    _logo = str(_payload.get("logo") or "").strip()
+                    if len(_title) > 64:
+                        self._send_json(400, {"ok": False, "error": "标题过长（最多 64 字符）"})
+                        return
+                    # logo 限制 2MB（base64 后约 2.7MB）
+                    if len(_logo) > 2 * 1024 * 1024:
+                        self._send_json(400, {"ok": False, "error": "图片过大（最大 2MB）"})
+                        return
+                    # 仅接受 image/ 开头或 data:image/ 开头
+                    if _logo and not (_logo.startswith("data:image/") or _logo.startswith("http://") or _logo.startswith("https://")):
+                        self._send_json(400, {"ok": False, "error": "logo 必须是 data URL 或 http(s) URL"})
+                        return
+                    _ok, _err = _save_admin_brand({"title": _title, "logo": _logo})
+                if not _ok:
+                    self._send_json(500, {"ok": False, "error": _err or "保存失败"})
+                    return
+                self._send_json(200, {"ok": True, "action": _action})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "error": "保存品牌信息失败: %s" % _e})
+
+        elif path == "/api/admin/music-fm":
+            # 保存/重置流萤FM
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                _payload = _json.loads(raw) if raw else {}
+            except Exception:
+                _payload = {}
+            _action = str(_payload.get("action") or "save").strip()
+            try:
+                if _action == "reset":
+                    _ok, _err = _save_music_fm({}, reset=True)
+                else:
+                    _title = str(_payload.get("title") or "流萤FM").strip()[:64]
+                    _subtitle = str(_payload.get("subtitle") or "与流萤一起走在路上").strip()[:128]
+                    _cover = str(_payload.get("cover") or "/admin/assets/music/cover.png").strip()
+                    if _cover and not (_cover.startswith("data:image/") or _cover.startswith("http://") or _cover.startswith("https://") or _cover.startswith("/")):
+                        self._send_json(400, {"ok": False, "error": "封面必须是 data URL / http(s) / 站内路径"})
+                        return
+                    if len(_cover) > 2 * 1024 * 1024:
+                        self._send_json(400, {"ok": False, "error": "封面图片过大（最大 2MB）"})
+                        return
+                    _ok, _err = _save_music_fm({"title": _title, "subtitle": _subtitle, "cover": _cover})
+                if not _ok:
+                    self._send_json(500, {"ok": False, "error": _err or "保存失败"})
+                    return
+                self._send_json(200, {"ok": True, "action": _action})
+            except Exception as _e:
+                self._send_json(500, {"ok": False, "error": "保存流萤FM配置失败: %s" % _e})
+
         elif path == "/api/runtime-settings":
 
             length = int(self.headers.get("Content-Length", "0") or 0)
@@ -16147,8 +16174,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             global _cache_clean_config
 
-            from datetime import datetime
-
             length = int(self.headers.get("Content-Length", "0") or 0)
 
             raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
@@ -16329,8 +16354,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 # 首次启用且从未运行过：以当前时间为基准，避免开启瞬间突发
 
                 if enabled and not cfg.get("last_run"):
-
-                    from datetime import datetime
 
                     cfg["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -17074,6 +17097,10 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             _bot = str(payload.get("bot") or "")
 
+            _pid_raw = payload.get("provider_id")
+
+            print("[console_server] /api/ai/chat bot=%s provider=%s" % (_bot, _pid_raw), flush=True)
+
             messages = _build_messages_from_payload(payload)
 
             if not messages:
@@ -17082,7 +17109,7 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
                 return
 
-            provider_id = _coerce_id(payload.get("provider_id"))
+            provider_id = _coerce_id(_pid_raw)
 
             with _lock:
 
@@ -17139,8 +17166,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
                 _chat_messages.append({"role": "system", "content": _k})
 
             _chat_messages.extend(list(messages))
-
-
 
             try:
 
@@ -17652,8 +17677,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             self._send_json(404, {"error": "not_found", "path": path})
 
-
-
     def do_DELETE(self):
 
         u = urlparse(self.path)
@@ -17796,10 +17819,6 @@ class _AdminAPIHandler(BaseHTTPRequestHandler):
 
             self._send_json(404, {"error": "not_found", "path": path})
 
-
-
-
-
 def _start_admin_api_server(host="127.0.0.1", port=9988):
 
     global _admin_api_started, _admin_httpd
@@ -17883,8 +17902,4 @@ def _start_admin_api_server(host="127.0.0.1", port=9988):
             print("[console_server] admin api 启动异常: %s" % e, flush=True)
 
             return False
-
-
-
-
 

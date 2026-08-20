@@ -276,7 +276,7 @@ async def handle(ctx) -> bool:
 ### 9.1 目录结构（扁平，无子目录）
 
 ```
-<你的仓库>/
+<your-github-username>/
 ├── index.json                 # 总目录（仅列 key + path；bot 一次拉取）
 ├── README.md
 ├── <key>.py                   # 插件源码（与外置插件同契约），平铺在根
@@ -343,7 +343,7 @@ REMOTE_MARKET_DIR    = "插件市场"                         # 仅作为「inde
 REMOTE_MARKET_BASE   = "https://raw.githubusercontent.com/%s/%s/%s/" % (...)  # 默认只到分支层
 ```
 
-> 想让 bot 从**你自己的仓库**拉市场，修改这几个常量（或对应的配置项）指向你的仓库即可。
+> 想让 bot 从**自建仓库**拉市场，修改这几个常量（或对应的配置项）指向自建仓库即可。
 > 拉取时按以下顺序尝试 `index.json`：① `<base>index.json`（根目录，本仓库采用）→ ② `<base>/<REMOTE_MARKET_DIR>/index.json`（子目录回退）。
 >
 > **控制台「插件市场」页可直接粘贴任意仓库地址**（`https://github.com/OWNER/REPO` 或 `https://raw.githubusercontent.com/OWNER/REPO[/...]`，缺失分支时自动补默认分支）。扁平仓库填到分支层即可，bot 会在该基址下找 `index.json` 与 `<key>.py` / `<key>.meta.json`。
@@ -430,7 +430,7 @@ async def handle(ctx) -> bool:
 - 发图前是否先 `ctx.reply` 了？`reply` 会消耗 `msg_id`，导致后续发图缺少上下文（见 §5.2）。
 
 **Q5：想发到自己的插件市场？**
-- 修改 `modules/plugin_registry.py` 里的 `REMOTE_MARKET_OWNER/REPO/BRANCH`，指向你的仓库（见 §9.5）。
+- 修改 `modules/plugin_registry.py` 里的 `REMOTE_MARKET_OWNER/REPO/BRANCH`，指向自建仓库（见 §9.5）。
 
 **Q6：外置插件和内置模块怎么共存？**
 - 完全解耦：外置插件在 `external_plugins` 步骤统一分发，排在内置功能之后。两者通过同一 `PluginContext` 契约协作，互不侵入。

@@ -2,10 +2,10 @@
 # 在 QQ 开放平台 (https://q.qq.com) 创建机器人后获取以下信息
 
 # 机器人 AppID
-appid: "YOUR_APPID"
+appid: ""
 
 # 机器人 Token
-token: "YOUR_TOKEN"
+token: ""
 
 # 沙箱环境可在此填写沙箱频道 ID（可选）
 # sandbox_guild_id: "xxxxxxxx"
@@ -15,3 +15,16 @@ event_mode: "websocket"
 
 # 运行环境: sandbox / production
 environment: "production"
+
+# ============================================================
+# 插件市场：远程仓库默认地址
+# - 支持两种写法：GitHub 完整 URL（自动转 raw.githubusercontent.com）或直接 raw URL
+# - 可在管理后台「运行设置 → 插件市场」页临时修改（运行时覆盖）
+# - 国内推荐用 gitee（服务器在国内，最稳最快）：
+#     https://gitee.com/geng-dan/firefiy-qqofficial-bot-piugins/raw/main
+# - 备选镜像：cdn.jsdelivr.net / raw.githubusercontent.com / gh-proxy.com
+# ============================================================
+plugin_market:
+  repo_url: "https://gitee.com/geng-dan/firefiy-qqofficial-bot-piugins/raw/main"
+  branch: "main"
+  index_subdir: ""              # 仓库子目录（index.json 所在目录）；留空=根目录
