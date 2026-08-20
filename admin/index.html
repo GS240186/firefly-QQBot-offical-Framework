@@ -41,8 +41,8 @@
     } catch (e) { /* 后端未就绪则放行，正常显示后台 */ }
 
   })();
-
 </script>
+
 
 <style>
 
@@ -164,6 +164,12 @@
 
     --custom-switch-track: #4a4e6e;
 
+    /* 音乐播放器主题色（跟随深浅模式，浅色下用半透明白叠在 --bg 上取 tint） */
+    --music-panel-bg: linear-gradient(rgba(255,255,255,.9), rgba(255,255,255,.9)), var(--bg);
+    --music-tab-bg: linear-gradient(180deg, rgba(255,255,255,.95), rgba(245,247,255,.93)), var(--bg);
+    --music-btn-bg: linear-gradient(rgba(255,255,255,.95), rgba(255,255,255,.95)), var(--bg);
+    --music-btn-ink: var(--ink);
+
   }
 
   body.dark-mode {
@@ -199,6 +205,12 @@
     --border: var(--custom-border);
 
     --text: #f0f1f7;
+
+    /* 音乐播放器深色主题色 */
+    --music-panel-bg: rgba(30,33,53,0.96);
+    --music-tab-bg: linear-gradient(180deg, rgba(30,33,53,0.96), rgba(24,26,42,0.94));
+    --music-btn-bg: var(--custom-bg2);
+    --music-btn-ink: var(--ink);
 
   }
 
@@ -2935,6 +2947,15 @@
   }
 
   .ann-scope-select:focus { outline: none; border-color: var(--accent); }
+  .ann-bot-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .ann-bot-row .ann-lbl { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+  .ann-bot-select {
+    border: 1px solid var(--rule); background: var(--bg); color: var(--ink);
+    font-size: 12.5px; padding: 5px 8px; border-radius: 6px;
+    font-family: inherit; min-width: 150px; cursor: pointer;
+  }
+  .ann-bot-select:focus { outline: none; border-color: var(--accent); }
+
 
   .ann-select-ops { display: none; align-items: center; gap: 10px; }
 
@@ -4776,11 +4797,6 @@
   /* 插件市场：仓库地址 + 卡片 */
   .pm-market-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
   .pm-market-title { font-size: 15px; font-weight: 700; color: var(--text); }
-  .pm-repo-box { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 260px; justify-content: flex-end; }
-  .pm-repo-input { flex: 1; min-width: 200px; max-width: 460px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg2); color: var(--text); font-size: 12px; }
-  .pm-repo-save { padding: 7px 16px; border-radius: 8px; border: 1px solid var(--purple, #7c5cff); background: var(--purple, #7c5cff); color: #fff; font-size: 13px; cursor: pointer; font-weight: 500; white-space: nowrap; }
-  .pm-repo-save:disabled { opacity: 0.6; cursor: default; }
-  .pm-repo-save:hover:not(:disabled) { filter: brightness(1.05); }
   .pm-installed { font-size: 12px; color: #16a34a; font-weight: 600; }
 
   /* 视频限制配置面板 */
@@ -5281,11 +5297,9 @@
 
   /* ====== 个性设置页 ====== */
 
-  .personalize-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 16px; align-items: start; }
-
-  @media (max-width: 1100px) { .personalize-grid { grid-template-columns: 1fr 1fr; } }
-
-  @media (max-width: 720px) { .personalize-grid { grid-template-columns: 1fr; } }
+  .personalize-grid { display: flex; flex-direction: column; gap: 16px; }
+  /* 品牌信息和流萤FM 设置卡片：纵向独占整行，内部左右布局更宽 */
+  .personalize-grid > .card.pg-full { width: 100%; }
 
   .personalize-preview {
 
@@ -5406,6 +5420,282 @@
   .personalize-presets .preset-dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.08); flex: 0 0 14px; }
 
   .personalize-presets .preset-name { font-size: 12px; color: var(--ink); }
+
+  /* 品牌信息卡片（个性设置页） */
+  .brand-form-row {
+    display: flex;
+    gap: 20px;
+    align-items: stretch;
+  }
+  /* 字段列表：单列纵向堆叠（label 在上、input 在下） */
+  .brand-form-row .brand-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .brand-form-row .brand-preview {
+    flex: 0 0 240px;
+    background: linear-gradient(160deg, #1e2640 0%, #131a30 100%);
+    border: 1px solid rgba(91, 142, 249, .28);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: inset 0 2px 12px rgba(0, 0, 0, .35), 0 4px 16px rgba(59, 110, 245, .12);
+    position: relative;
+    overflow: hidden;
+  }
+  .brand-form-row .brand-preview::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 30% 20%, rgba(91, 142, 249, .18), transparent 60%);
+    pointer-events: none;
+  }
+  .brand-form-row .brand-preview-side {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    z-index: 1;
+  }
+  .brand-form-row .brand-preview .logo {
+    width: 64px;
+    height: 64px;
+    border-radius: 12px;
+    object-fit: cover;
+    box-shadow: 0 4px 14px rgba(59, 110, 245, .45);
+    flex: 0 0 auto;
+    background: #0f172a;
+    border: 1px solid rgba(91, 142, 249, .35);
+  }
+  .brand-form-row .brand-preview-meta {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .brand-form-row .brand-preview-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e2e6f5;
+    letter-spacing: .02em;
+  }
+  .brand-form-row .brand-preview-sub {
+    font-size: 11px;
+    color: #8b9bbf;
+    font-weight: 500;
+  }
+  /* 兼容旧 JS：旧版用的是 .name 节点，新结构改用 .brand-preview-name；同名即可 */
+  .brand-form-row .brand-preview .name,
+  .brand-form-row .brand-preview .brand-preview-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e2e6f5;
+    letter-spacing: .02em;
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .brand-form-row .brand-fields {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+  }
+  .brand-form-row .brand-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .brand-form-row .brand-field > label {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ink, #e2e6f5);
+  }
+  .brand-form-row .brand-field .input {
+    background: #1a2138;
+    border: 1px solid rgba(91, 142, 249, .25);
+    color: #e2e6f5;
+    border-radius: 6px;
+    padding: 8px 11px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color .12s, box-shadow .12s;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .brand-form-row .brand-field .input:focus {
+    border-color: #5b8ef9;
+    background: #1a2138;
+    color: #fff;
+    box-shadow: 0 0 0 3px rgba(91, 142, 249, .25);
+  }
+  .brand-form-row .brand-field .input::placeholder {
+    color: #6b7898;
+    font-style: italic;
+    opacity: 1;
+  }
+  .brand-form-row .brand-field-tip {
+    font-size: 11.5px;
+    color: var(--muted, #8b91b5);
+    font-weight: 500;
+    line-height: 1.55;
+  }
+  .brand-form-row .brand-logo-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .brand-form-row .brand-logo-row .input { flex: 1 1 auto; }
+  .brand-form-row .brand-upload-btn {
+    flex: 0 0 auto;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    background: rgba(91, 142, 249, .12);
+    border: 1px solid rgba(91, 142, 249, .3);
+    color: #b8c4e8;
+    font-size: 12.5px;
+    font-weight: 600;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .brand-form-row .brand-upload-btn:hover {
+    background: rgba(91, 142, 249, .22);
+    color: #fff;
+    border-color: rgba(91, 142, 249, .55);
+  }
+  .brand-form-row .brand-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+  .brand-form-row .brand-actions .btn {
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid rgba(91, 142, 249, .3);
+    background: #232a47;
+    color: #d8def0;
+    font-family: inherit;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .brand-form-row .brand-actions .btn:hover {
+    background: rgba(91, 142, 249, .2);
+    color: #fff;
+    border-color: rgba(91, 142, 249, .55);
+  }
+  .brand-form-row .brand-actions .btn.primary {
+    background: linear-gradient(135deg, #5b8ef9 0%, #3b6ef5 100%);
+    border-color: transparent;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(59, 110, 245, .35);
+  }
+  .brand-form-row .brand-actions .btn.primary:hover {
+    background: linear-gradient(135deg, #6e9afa 0%, #2a5ce0 100%);
+  }
+  @media (max-width: 860px) {
+    .brand-form-row { flex-direction: column; }
+    .brand-form-row .brand-preview { flex: 0 0 auto; width: 100%; box-sizing: border-box; }
+    .brand-form-row .brand-grid { grid-template-columns: 1fr; }
+  }
+
+  /* FM 预览（与 brand-preview 类似，但展示唱片 + 文字） */
+  .brand-form-row .fm-preview {
+    flex: 0 0 240px;
+    background: linear-gradient(160deg, #1e2640 0%, #131a30 100%);
+    border: 1px solid rgba(91, 142, 249, .28);
+    border-radius: 12px;
+    padding: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: inset 0 2px 12px rgba(0, 0, 0, .35), 0 4px 16px rgba(59, 110, 245, .12);
+    position: relative;
+    overflow: hidden;
+  }
+  .brand-form-row .fm-preview::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 70% 80%, rgba(91, 142, 249, .18), transparent 60%);
+    pointer-events: none;
+  }
+  .brand-form-row .fm-preview-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    z-index: 1;
+  }
+  .brand-form-row .fm-preview-cover {
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, #5b8ef9, #7aa9ff, #5b8ef9);
+    padding: 3px;
+    box-shadow: 0 0 0 2px rgba(91, 142, 249, .35), 0 3px 10px rgba(59, 110, 245, .3);
+    flex: 0 0 auto;
+  }
+  .brand-form-row .fm-preview-cover img {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
+    box-shadow: inset 0 0 0 2px rgba(15, 23, 42, .85);
+  }
+  .brand-form-row .fm-preview-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .brand-form-row .fm-preview-title {
+    font-size: 14px;
+    font-weight: 800;
+    color: #e2e6f5;
+    letter-spacing: .02em;
+  }
+  .brand-form-row .fm-preview-title span {
+    background: linear-gradient(135deg, #5b8ef9 0%, #b06bff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    margin-left: 2px;
+  }
+  .brand-form-row .fm-preview-subtitle {
+    font-size: 11.5px;
+    color: #8b9bbf;
+    font-weight: 500;
+    line-height: 1.45;
+    word-break: break-all;
+  }
+  /* 单列后：跨列规则无效，保留以防外部 grid 引用 */
+  .brand-form-row .brand-field-full { grid-column: auto; }
+  @media (max-width: 720px) {
+    .brand-form-row .fm-preview { flex: 0 0 auto; width: 100%; box-sizing: border-box; }
+  }
+
+  /* 音乐面板里 FM 副标题 */
+  .music-fm-subtitle {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--muted, #8b91b5);
+    margin-top: 4px;
+    line-height: 1.4;
+    text-align: center;
+  }
 
   .personalize-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
@@ -5590,6 +5880,7 @@
   .ai-auto-reply-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
 
   .ai-auto-reply-desc { font-size: 12px; color: var(--muted); }
+
 
   .ai-chat-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 
@@ -6093,6 +6384,71 @@
 
   .kb-empty-entries { text-align: center; padding: 22px 10px; color: var(--muted); font-size: 13px; border: 1px dashed var(--border); border-radius: 8px; }
 
+
+
+/* ====== 控制台音乐播放器 ====== */
+.music-player{position:fixed !important;right:0;top:0;bottom:0;z-index:99999;pointer-events:none;}
+.music-tab{position:absolute;right:0;top:50%;transform:translateY(-50%);pointer-events:auto;width:36px;height:92px;border-radius:12px 0 0 12px;background:var(--music-tab-bg);backdrop-filter:blur(14px);border:1px solid var(--border);border-right:none;box-shadow:-2px 4px 14px rgba(31,34,64,.1);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .25s ease, box-shadow .25s ease;}
+.music-tab:hover{transform:translateX(-4px);box-shadow:-4px 6px 18px rgba(31,34,64,.12);}
+/* 首次进入控制台时 tab 脉冲提示（一次性，点击后消失） */
+.music-tab.hint{animation:music-tab-pulse 1.6s ease-in-out 3;box-shadow:-2px 4px 18px rgba(46,230,170,.55);}
+@keyframes music-tab-pulse{0%,100%{transform:translateY(-50%) translateX(0);}50%{transform:translateY(-50%) translateX(-7px);}}
+@media (prefers-reduced-motion:reduce){.music-tab.hint{animation:none;box-shadow:-2px 4px 18px rgba(46,230,170,.55);}}
+.music-tab svg{width:20px;height:20px;color:var(--accent);transition:transform .35s ease;}
+.music-player.open .music-tab svg{transform:rotate(180deg);}
+.music-panel{position:absolute;right:0;top:0;bottom:0;pointer-events:auto;width:320px;height:100vh;max-height:100vh;background:var(--music-panel-bg);backdrop-filter:blur(20px);border-left:1px solid var(--border);box-shadow:-12px 0 32px rgba(31,34,64,.08);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .35s cubic-bezier(.2,.8,.2,1);padding:22px 18px;overflow-y:auto;}
+.music-player.open .music-panel{transform:translateX(0);}
+.music-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;}
+.music-title{font-size:16px;font-weight:800;color:var(--ink);letter-spacing:.3px;}
+.music-title span{color:var(--accent);}
+.music-close{width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.music-cover{position:relative;width:170px;height:170px;margin:0 auto 18px;border-radius:50%;padding:6px;background:conic-gradient(from 0deg, rgba(59,110,245,.22), rgba(0,184,148,.22), rgba(140,92,255,.22), rgba(59,110,245,.22));box-shadow:0 12px 34px rgba(31,34,64,.12);}
+.music-cover img{width:100%;height:100%;border-radius:50%;object-fit:cover;display:block;box-shadow:inset 0 0 0 4px rgba(255,255,255,.85);}
+.music-cover.playing img{animation:music-spin 8s linear infinite;}
+@keyframes music-spin{to{transform:rotate(360deg);}}
+.music-info{text-align:center;margin-bottom:14px;}
+.music-song{font-size:14px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px;margin:0 auto 4px;}
+.music-artist{font-size:12px;color:var(--muted);}
+.music-controls{display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:14px;}
+.music-btn{width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--music-btn-bg);color:var(--music-btn-ink);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .15s ease, box-shadow .2s ease;}
+.music-btn:hover{transform:translateY(-2px);box-shadow:var(--shadow-sm);}
+.music-btn.primary{width:48px;height:48px;background:var(--accent);border-color:var(--accent);color:#fff;}
+.music-btn svg{width:18px;height:18px;}
+.music-progress{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:11px;color:var(--muted);}
+.music-progress input[type=range]{flex:1;-webkit-appearance:none;height:4px;border-radius:2px;background:var(--rule);outline:none;}
+.music-progress input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;}
+.music-progress input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--accent);cursor:pointer;border:none;}
+.music-vol{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+.music-vol input[type=range]{flex:1;-webkit-appearance:none;height:4px;border-radius:2px;background:var(--rule);}
+.music-vol input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:var(--accent);cursor:pointer;}
+.music-actions{display:flex;gap:8px;margin-bottom:12px;}
+.music-actions .btn{flex:1;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--music-btn-bg);color:var(--music-btn-ink);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;transition:background .2s ease;}
+.music-actions .btn:hover{background:var(--accent-soft);}
+.music-actions .btn.loop-on{background:var(--accent);border-color:var(--accent);color:#fff;}
+.music-section-title{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;}
+.music-list{flex:1;overflow-y:auto;padding-right:4px;margin:0 -4px 0 0;}
+.music-list ul{list-style:none;margin:0;padding:0;}
+.music-list li{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;border-radius:8px;cursor:pointer;transition:background .15s ease,color .15s ease,box-shadow .15s ease;font-size:13px;color:var(--ink);}
+.music-list li:hover{background:var(--accent-soft);color:var(--ink);}
+.music-list li.active{background:var(--accent);color:#fff;font-weight:700;box-shadow:0 2px 10px rgba(59,110,245,.28);}
+.music-list li.active .meta{color:rgba(255,255,255,.82);}
+.music-list li .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px;}
+.music-list li .meta{font-size:11px;color:var(--muted);}
+.music-empty{text-align:center;color:var(--muted);font-size:12px;padding:26px 10px;}
+.music-upload{display:none;}
+
+/* 深色模式下，强制保证音乐面板文字高对比（不依赖全局变量是否被意外覆盖） */
+body.dark-mode .music-title,
+body.dark-mode .music-song{color:#ffffff;}
+body.dark-mode .music-artist{color:#c9d2ee;}
+body.dark-mode .music-section-title{color:#aab1d6;}
+body.dark-mode .music-close{color:#cbd5e8;border-color:var(--border);}
+body.dark-mode .music-list li{color:#eef1fb;}
+body.dark-mode .music-list li .meta{color:#9aa6cf;}
+body.dark-mode .music-progress,
+body.dark-mode .music-vol{color:#9aa6cf;}
+@media (max-width:768px){.music-panel{width:86vw;}}
+@media (prefers-reduced-motion:reduce){.music-cover.playing img{animation:none;}}
 </style>
 
 <style>
@@ -6159,14 +6515,10 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
   <!-- 侧边栏 -->
 
   <aside class="sidebar">
-
-    <div class="brand">
-
-      <img class="logo" src="../assets/menu_banner.jpg" alt="小流萤">
-
-      <div class="name">小流萤管理后台</div>
-
-    </div>
+<div class="brand" id="sidebar-brand">
+<img class="logo" id="sidebar-brand-logo" src="../assets/menu_banner.jpg" alt="小流萤">
+<div class="name" id="sidebar-brand-name">小流萤管理后台</div>
+</div>
 
     <nav class="nav" id="side-nav">
 
@@ -6256,39 +6608,21 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
       <div class="nav-group" id="nav-group-features">
 
-        <div class="item has-submenu" data-group="features" data-tip="功能中心">
+        <div class="item has-submenu" data-group="features" data-tip="插件与功能">
 
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>
 
-          <span>功能中心</span><span class="caret">▾</span>
+          <span>插件与功能</span><span class="caret">▾</span>
 
         </div>
 
         <div class="submenu" data-group="features">
 
-          <div class="subitem" data-page="feature-config" data-tip="功能配置">功能配置</div>
-
-          <div class="subitem" data-page="qa-rules" data-tip="问答规则">问答规则</div>
-
-        </div>
-
-      </div>
-
-      <div class="nav-group" id="nav-group-plugin">
-
-        <div class="item has-submenu" data-group="plugin" data-tip="插件中心">
-
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>
-
-          <span>插件中心</span><span class="caret">▾</span>
-
-        </div>
-
-        <div class="submenu" data-group="plugin">
-
           <div class="subitem" data-page="plugin-config" data-tip="插件配置">插件配置</div>
 
           <div class="subitem" data-page="plugin-market" data-tip="插件市场">插件市场</div>
+
+          <div class="subitem" data-page="feature-menu" data-tip="交互设置">交互设置</div>
 
         </div>
 
@@ -6836,25 +7170,31 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
         <div class="panel">
 
-          <h3><span class="bar"></span>公告通知</h3>
+          <h3><span class="bar"></span>公告通知 · 统一群发</h3>
 
           <div class="ann-target" id="ann-target">
 
             <div class="ann-target-head">
 
-              <span class="ann-target-title">发布范围</span>
+              <span class="ann-target-title">发布设置</span>
 
             </div>
 
-            <div class="ann-scope-row">
+            <div class="ann-bot-row">
+              <span class="ann-lbl">机器人</span>
+              <select class="ann-bot-select" id="ann-bot">
+                <option value="">全部机器人</option>
+              </select>
+            </div>
 
+            <div class="ann-scope-row">
               <select class="ann-scope-select" id="ann-scope">
 
                 <option value="all" selected>全部</option>
 
                 <option value="groups">群聊</option>
 
-                <option value="persons">好友</option>
+                <option value="persons">单聊</option>
 
               </select>
 
@@ -6993,48 +7333,6 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
             <div class="overview-row"><span class="k">今日签到</span><span class="v" id="overview-checkin">0 次</span></div>
 
             <div class="overview-row"><span class="k">活跃插件</span><span class="v" id="overview-plugins">0 个<span class="overview-shared-tag">共享</span></span></div>
-
-          </div>
-
-          <div class="panel quick-card">
-
-            <h3><span class="bar" style="background: var(--accent-2);"></span>快捷操作</h3>
-
-            <div class="quick-grid">
-
-              <button class="quick-btn" data-page="robots">
-
-                <span class="ico" style="background: linear-gradient(135deg, #6c8eff, var(--accent));">🤖</span>
-
-                <span class="label">机器人管理</span>
-
-              </button>
-
-              <button class="quick-btn" data-page="group-logs">
-
-                <span class="ico" style="background: linear-gradient(135deg, #ffb088, #ff7e4d);">✉</span>
-
-                <span class="label">消息记录</span>
-
-              </button>
-
-              <button class="quick-btn" data-page="feature-config">
-
-                <span class="ico" style="background: linear-gradient(135deg, #c8a8ff, var(--purple));">⚙</span>
-
-                <span class="label">功能配置</span>
-
-              </button>
-
-              <button class="quick-btn" data-page="group-monitor">
-
-                <span class="ico" style="background: linear-gradient(135deg, #82c8ff, #3b9eff);">📹</span>
-
-                <span class="label">消息监控</span>
-
-              </button>
-
-            </div>
 
           </div>
 
@@ -7354,25 +7652,31 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
         <div class="panel">
 
-          <h3><span class="bar"></span>公告通知</h3>
+          <h3><span class="bar"></span>公告通知 · 统一群发</h3>
 
           <div class="ann-target" id="data-ann-target">
 
             <div class="ann-target-head">
 
-              <span class="ann-target-title">发布范围</span>
+              <span class="ann-target-title">发布设置</span>
 
             </div>
 
-            <div class="ann-scope-row">
+            <div class="ann-bot-row">
+              <span class="ann-lbl">机器人</span>
+              <select class="ann-bot-select" id="data-ann-bot">
+                <option value="">全部机器人</option>
+              </select>
+            </div>
 
+            <div class="ann-scope-row">
               <select class="ann-scope-select" id="data-ann-scope">
 
                 <option value="all" selected>全部</option>
 
                 <option value="groups">群聊</option>
 
-                <option value="persons">好友</option>
+                <option value="persons">单聊</option>
 
               </select>
 
@@ -7867,6 +8171,8 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
             <button class="btn-blue" id="usr-search-btn" type="button">搜索</button>
 
             <button class="btn-ghost" id="usr-reset-btn" type="button">重置</button>
+
+            <button class="btn-ghost" id="usr-refresh-btn" type="button">🔄 刷新</button>
 
             <button class="btn-danger" id="usr-batch-delete" type="button">批量删除</button>
 
@@ -8470,6 +8776,8 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
             <button class="btn-ghost" id="grp-reset-btn" type="button">重置</button>
 
+            <button class="btn-ghost" id="grp-refresh-btn" type="button">🔄 刷新</button>
+
             <button class="btn-danger" id="grp-batch-delete" type="button">批量删除</button>
 
             <button class="btn-ghost" id="grp-batch-cancel" type="button" style="display:none;">取消</button>
@@ -8548,7 +8856,6 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
         </div>
 
-      </section>
       </section>
 
       <!-- ============ 群聊管理：入群申请列表 ============ -->
@@ -8870,13 +9177,23 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
       <!-- ============ 功能配置 ============ -->
 
+      <section class="page" id="page-feature-menu">
+        <div class="page-head">
+          <h1>交互设置</h1>
+          <span class="sub">自定义「帮助」菜单（用户输入"帮助"看到的卡片）：顶部图/标题/引言/按钮位置/按钮文字/链接URL。支持条件显示（系统开关/插件启用/群聊判断）。实时热重载，保存后无需重启 bot。</span>
+        </div>
+        <div id="feature-menu-body" class="fm-root">
+          <div class="fm-loading">加载中...</div>
+        </div>
+      </section>
+
       <section class="page" id="page-feature-config">
 
         <div class="page-head">
 
-          <h1>功能配置</h1>
+          <h1>插件与功能 · 旧式功能开关</h1>
 
-          <span class="sub">配置各功能模块参数与流程</span>
+          <span class="sub">本页保留仅为兼容旧版流程图/视频限制/整点报时/入群通知/签到规则/违禁词管理/违禁词拦截日志/问答规则等内嵌 panel。功能开关本身已统一在「插件配置」面板的「系统」列中管理（双轨同步）。</span>
 
         </div>
 
@@ -9339,11 +9656,19 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
               </div>
 
+              <div class="vl-row">
+
+                <label>每日抽奖次数上限（0 = 不限制）</label>
+
+                <input type="number" id="ck-lottery-daily-limit" min="0" step="1" value="2" autocomplete="off" />
+
+              </div>
+
             </div>
 
           </div>
 
-          <div class="info-banner"><span>修改后立即生效：新规则仅影响之后的签到/抽奖，已发放的历史积分不受影响。抽奖逻辑：消耗固定积分，60% 概率中奖，中奖返还 <strong>[消耗, 消耗×3]</strong> 随机积分。</span></div>
+          <div class="info-banner"><span>修改后立即生效：新规则仅影响之后的签到/抽奖，已发放的历史积分不受影响。抽奖逻辑：消耗固定积分，60% 概率中奖，中奖返还 <strong>[消耗, 消耗×3]</strong> 随机积分；每人每天最多抽 <strong>2</strong> 次（可在「每日抽奖次数上限」调整，次日刷新）。</span></div>
 
           <div class="feature-actions">
 
@@ -10125,7 +10450,7 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
           <!-- 背景色设置 -->
 
-          <div class="card">
+          <div class="card pg-full">
 
             <div class="card-head">
 
@@ -10263,7 +10588,7 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
           <!-- 布局设置 -->
 
-          <div class="card">
+          <div class="card pg-full">
 
             <div class="card-head">
 
@@ -10326,6 +10651,119 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
           </div>
 
 
+          <!-- 品牌信息 -->
+          <div class="card pg-full">
+            <div class="card-head">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="3"/>
+                <circle cx="9" cy="9" r="2.2"/>
+                <path d="M3 17l5-5 4 4 3-3 6 6"/>
+              </svg>
+              <span>品牌信息</span>
+              <span style="margin-left:auto;font-size:11.5px;color:var(--muted,#8b91b5);font-weight:500;">自定义侧边栏 Logo + 标题</span>
+            </div>
+            <div class="card-body">
+              <div class="brand-form-row">
+                <!-- 左侧：预览框（精致化） -->
+                <div class="brand-preview" id="brand-preview">
+                  <div class="brand-preview-side">
+                    <img class="logo" id="brand-preview-logo" src="../assets/menu_banner.jpg" alt="logo">
+                    <div class="brand-preview-meta">
+                      <div class="brand-preview-name" id="brand-preview-name">小流萤管理后台</div>
+                      <div class="brand-preview-sub">侧边栏顶部预览</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 右侧：字段双列 -->
+                <div class="brand-fields">
+                  <div class="brand-grid">
+                    <div class="brand-field brand-field-title">
+                      <label>管理台标题</label>
+                      <input type="text" class="input" id="brand-title-input" placeholder="如：小流萤管理后台" maxlength="64" />
+                      <div class="brand-field-tip">显示在左侧边栏顶部，浏览器标签页也会同步</div>
+                    </div>
+
+                    <div class="brand-field brand-field-logo">
+                      <label>管理台 Logo</label>
+                      <div class="brand-logo-row">
+                        <input type="text" class="input" id="brand-logo-input" placeholder="图片 URL 或 上传本地文件" />
+                        <label class="btn brand-upload-btn" for="brand-logo-file">📁 上传</label>
+                        <input type="file" id="brand-logo-file" accept="image/*" style="display:none" />
+                      </div>
+                      <div class="brand-field-tip">支持 PNG/JPG/GIF/WebP，≤ 2MB。也可填写 http(s) 图片地址</div>
+                    </div>
+                  </div>
+
+                  <div class="brand-actions">
+                    <button class="btn" id="brand-reset-btn">恢复默认</button>
+                    <button class="btn primary" id="brand-save-btn">保存品牌</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+
+          <!-- 流萤FM 设置 -->
+          <div class="card pg-full">
+            <div class="card-head">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="9"/>
+                <circle cx="12" cy="12" r="2.5"/>
+                <path d="M6 12h.01M18 12h.01M12 6v.01M12 18v.01"/>
+              </svg>
+              <span>流萤FM 设置</span>
+              <span style="margin-left:auto;font-size:11.5px;color:var(--muted,#8b91b5);font-weight:500;">自定义音乐面板的标题 / 副标题 / 唱片封面</span>
+            </div>
+            <div class="card-body">
+              <div class="brand-form-row">
+                <!-- 左侧：FM 预览框（精致化） -->
+                <div class="fm-preview" id="fm-preview">
+                  <div class="fm-preview-inner">
+                    <div class="fm-preview-cover"><img id="fm-preview-cover-img" src="/admin/assets/music/cover.png" alt="封面"/></div>
+                    <div class="fm-preview-text">
+                      <div class="fm-preview-title" id="fm-preview-title">流萤<span>FM</span></div>
+                      <div class="fm-preview-subtitle" id="fm-preview-subtitle">与流萤一起走在路上</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 右侧：字段双列 -->
+                <div class="brand-fields">
+                  <div class="brand-grid">
+                    <div class="brand-field">
+                      <label>面板标题</label>
+                      <input type="text" class="input" id="fm-title-input" placeholder="如：流萤FM" maxlength="64" />
+                      <div class="brand-field-tip">含「FM」字样会自动高亮。例如「流萤FM」「小萤FM」「MyFM」</div>
+                    </div>
+
+                    <div class="brand-field">
+                      <label>副标题</label>
+                      <input type="text" class="input" id="fm-subtitle-input" placeholder="如：与流萤一起走在路上" maxlength="128" />
+                      <div class="brand-field-tip">显示在音乐面板歌曲名下方</div>
+                    </div>
+                  </div>
+
+                  <div class="brand-field brand-field-full">
+                    <label>唱片封面</label>
+                    <div class="brand-logo-row">
+                      <input type="text" class="input" id="fm-cover-input" placeholder="图片 URL 或 站内路径 或 上传本地文件" />
+                      <label class="btn brand-upload-btn" for="fm-cover-file">📁 上传</label>
+                      <input type="file" id="fm-cover-file" accept="image/*" style="display:none" />
+                    </div>
+                    <div class="brand-field-tip">支持 PNG/JPG/GIF/WebP，≤ 2MB。也可用 http(s) 或站内路径（如 /admin/assets/music/cover.png）</div>
+                  </div>
+
+                  <div class="brand-actions">
+                    <button class="btn" id="fm-reset-btn">恢复默认</button>
+                    <button class="btn primary" id="fm-save-btn">保存设置</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
 
           <!-- 提示卡片 -->
 
@@ -10374,28 +10812,7 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
           <span class="sub">与机器人进行实时对话测试，验证 AI 回复效果</span>
 
         </div>
-
-        <div class="ai-auto-reply-bar">
-
-          <div class="ai-auto-reply-meta">
-
-            <div class="ai-auto-reply-title">🤖 AI 自动回复</div>
-
-            <div class="ai-auto-reply-desc">被 @机器人或私聊时启用 AI 自动回复（关闭后仅本页测试可用）</div>
-
-          </div>
-
-          <label class="switch">
-
-            <input type="checkbox" id="ai-auto-reply-switch">
-
-            <span class="track"></span><span class="thumb"></span>
-
-          </label>
-
-        </div>
-
-        <div class="ai-chat-bar">
+<div class="ai-chat-bar">
 
           <select class="select" id="ai-chat-bot-select"><option value="">选择机器人</option></select>
 
@@ -10895,6 +11312,92 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
 
 
+      <!-- 新增人格弹窗 -->
+      <div class="modal-overlay" id="ai-persona-new-modal" style="display:none;">
+
+        <div class="modal" style="width:560px;max-width:90vw;">
+
+          <div class="modal-head">
+
+            <h3>新建人格</h3>
+
+            <button class="modal-close" id="ai-persona-new-close">&times;</button>
+
+          </div>
+
+          <div class="modal-body ai-provider-modal-body">
+
+            <div class="ai-form-row">
+
+              <label class="ai-label"><span class="required">*</span>名称</label>
+
+              <input type="text" class="input" id="ai-persona-new-name" placeholder="如：傲娇猫娘 / 严谨助手 / 群管模式" maxlength="40" />
+
+            </div>
+
+            <div class="ai-form-row">
+
+              <label class="ai-label">人设内容</label>
+
+              <textarea id="ai-persona-new-text" class="input ai-persona-textarea" placeholder="描述这个人格的性格、说话风格、口头禅、禁忌……例如：你是一个活泼可爱的 QQ 群聊助手「小流萤」，说话俏皮、偶尔用 emoji，喜欢用简短幽默的方式回答。"></textarea>
+
+            </div>
+
+          </div>
+
+          <div class="modal-foot">
+
+            <button class="btn btn-ghost" id="ai-persona-new-cancel">取消</button>
+
+            <button class="btn btn-blue" id="ai-persona-new-ok">创建</button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+
+
+      <!-- 新建知识库弹窗 -->
+      <div class="modal-overlay" id="ai-kb-new-modal" style="display:none;">
+
+        <div class="modal" style="width:480px;max-width:90vw;">
+
+          <div class="modal-head">
+
+            <h3>新建知识库</h3>
+
+            <button class="modal-close" id="ai-kb-new-close">&times;</button>
+
+          </div>
+
+          <div class="modal-body ai-provider-modal-body">
+
+            <div class="ai-form-row">
+
+              <label class="ai-label"><span class="required">*</span>名称</label>
+
+              <input type="text" class="input" id="ai-kb-new-name" placeholder="如：群规库 / 产品 FAQ / 闲聊语料" maxlength="40" />
+
+            </div>
+
+          </div>
+
+          <div class="modal-foot">
+
+            <button class="btn btn-ghost" id="ai-kb-new-cancel">取消</button>
+
+            <button class="btn btn-blue" id="ai-kb-new-ok">创建</button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+
+
       <!-- 新增/编辑敏感词弹窗 -->
 
       <div class="modal-overlay" id="ai-sensitive-modal" style="display:none;">
@@ -11101,6 +11604,8 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
           <button class="btn" id="admin-cmd-status">📊 运行状态</button>
 
+          <button class="btn" id="admin-cmd-changepass">🔑 修改访问口令</button>
+
           <button class="btn btn-primary" id="admin-cmd-restart">🔄 重启机器人</button>
 
           <button class="btn btn-danger" id="admin-cmd-shutdown">⏻ 关闭机器人</button>
@@ -11108,6 +11613,8 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
         </div>
 
         <div class="admin-cmd-hint">点击「运行状态」可刷新下方实时数据；重启 / 关机为高危操作，会中断机器人服务，请确认后操作。</div>
+
+        <div class="admin-cmd-hint" id="admin-cmd-pass-hint" style="margin-top:6px;color:var(--muted);">🔑 访问口令：<span id="admin-cmd-pass-state">检测中…</span>；如需修改，点击上方「修改访问口令」按钮，修改成功后机器人将自动重启，之后需用新口令登录。</div>
 
       </div>
 
@@ -11762,6 +12269,14 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
           <p>小流萤是一个面向 QQ 群聊/私聊场景的全功能娱乐型机器人，提供 <strong>签到 / 视频 / 音乐 / 游戏 / 工具 / 学习 / 群管 / 小说 / 图片 / 问答规则 / AI 对话</strong>等二十余类功能（含游戏工具原神·星铁、插件系统等），所有功能均可在后台一键开启/关闭，无需重启机器人。</p>
 
+          <div class="doc-tip warn">
+
+            <strong>⚠️ 关于 <code>config.yaml</code></strong>
+
+            项目根目录的 <code>config.yaml</code> <strong>只起说明作用</strong>，bot 启动时不会读取它。真正的配置入口是 <code>modules/config.py</code>（单机器人的 AppID / Secret / 环境 / API key）或 <code>data/bots.json</code>（多机器人，由管理后台「机器人管理」维护）。更多说明见「安装部署」§3.2。
+
+          </div>
+
           <div class="doc-tags">
 
             <span class="doc-tag">QQ botpy SDK</span>
@@ -11802,7 +12317,7 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
             <span class="arrow">→</span>
 
-            <span class="step">14 个模块 handle_command</span>
+            <span class="step">注册表驱动分发（11 个内置功能 + 52 个外置插件）</span>
 
             <span class="arrow">→</span>
 
@@ -11840,7 +12355,7 @@ body.dark-mode .rt-row-eff{color:#cbd5e1;}
 
             <div class="doc-card"><div class="title">🎵 音乐</div><div class="desc">点歌 / 搜索 / 选歌 / 换源</div></div>
 
-            <div class="doc-card"><div class="title">🎮 游戏</div><div class="desc">五子棋 / 成语接龙 / 象棋 / 求签 / 答案之书 / 塔罗牌 / 运势</div></div>
+            <div class="doc-card"><div class="title">🎮 游戏</div><div class="desc">五子棋 / 成语接龙 / 象棋 / 求签 / 答案之书 / 塔罗牌 / 运势 / 今日老婆</div></div>
 
             <div class="doc-card"><div class="title">🛠 工具</div><div class="desc">视频解析 / 天气 / 王者荣耀 / 字典 / 疾病 / 垃圾分类</div></div>
 
@@ -12054,29 +12569,25 @@ C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe -m pip install -
 
           <h3>3.2 写入配置文件</h3>
 
-          <div class="doc-code"># 编辑 bot.py 顶部，或通过管理后台「机器人」→「添加机器人」按钮填写
+          <div class="doc-code"># ⚠️ 注意：项目根目录的 config.yaml 只是「说明性占位文件」，bot 不会读取它！
+# 真正的配置入口是 modules/config.py（单机器人）或 data/bots.json（多机器人）。
+# 单机器人：编辑 modules/config.py 顶部两个常量
+APPID  = "1234567890"     # 你的 AppID
+SECRET = "abcd1234SECRET" # 你的 AppSecret（QQ 开放平台叫 Secret / AppSecret）
+# 多机器人：保持 modules/config.py 的 APPID/SECRET 为空，
+# 直接通过管理后台「机器人管理 → 添加机器人」填写，会自动写入 data/bots.json</div>
 
-BOT_CONFIGS = {
+          <div class="doc-tip warn">
 
-    "my_bot": {
+            <strong>⚠️ 别再编辑 config.yaml 了</strong>
 
-        "appid": "1234567890",
+            那是项目里唯一一个<strong>只起注释作用</strong>的占位文件，bot 启动时不会读它。所有 AppID / Secret 真正生效的位置是 <code>modules/config.py</code>（单机器人）或 <code>data/bots.json</code>（多机器人，由控制台维护）。
 
-        "token": "abcd1234TOKENvalue",
-
-        "secret": "SECRET_optional",
-
-        "name": "小流萤",
-
-    },
-
-    # 可同时跑多个机器人，再加一个 key-value
-
-}</div>
+          </div>
 
           <div class="doc-tip">
 
-            <strong>提示</strong>推荐用管理后台「机器人管理 → 添加机器人」按钮图形化填写，会自动持久化到 <code>data/bot_config.json</code>，**无需手动改代码**。
+            <strong>提示</strong>推荐用管理后台「机器人管理 → 添加机器人」按钮图形化填写，会自动持久化到 <code>data/bots.json</code>，<strong>无需手动改代码</strong>。该文件支持同时挂多个机器人，每个独立开关 / 独立统计。
 
           </div>
 
@@ -12084,19 +12595,29 @@ BOT_CONFIGS = {
 
           <h3>3.3 启动机器人</h3>
 
-          <div class="doc-code"># 推荐：后台静默启动（Windows PowerShell）
+          <div class="doc-code"># 推荐：手动命令行（看清楚日志）
+# 在项目根目录的地址栏输入 cmd 回车打开命令行
 
-Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden -WorkingDirectory "C:\Users\123\Desktop\小流萤bot"
+# 1) 先停掉可能残留的旧进程
+taskkill /F /IM python.exe
 
+# 2) 清缓存（改过代码后必做，否则 .pyc 缓存会让你以为没生效）
+rd /s /q __pycache__ lib\__pycache__ modules\__pycache__
 
+# 3) 启动
+python bot.py</div>
 
-# 或前台启动（看日志）
+          <div class="doc-tip warn">
 
-C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe bot.py</div>
+            <strong>⚠️ 不要直接双击 go.cmd</strong>
+
+            <code>go.cmd</code> 只有一行 <code>python bot.py</code>，在 Windows 下双击运行后窗口会立即关闭，看不到报错。请改用上面的「任务 3：手动命令行」方式启动。
+
+          </div>
 
           <p>启动成功后会看到日志：<br>
 
-          <code>[INFO] on_ready 机器人上线：xxx</code> · <code>已注册接口: GET/POST /api/...</code> · <code>系统状态采集就绪</code></p>
+          <code>[INFO] on_ready 机器人上线：xxx</code> · <code>已注册接口: GET/POST /api/...</code> · <code>系统状态采集就绪</code> · <code>管理控制台已启动，访问地址: http://127.0.0.1:9988/</code></p>
 
         </div>
 
@@ -12108,11 +12629,25 @@ C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe bot.py</div>
 
           <p>浏览器打开：<code>http://127.0.0.1:9988/admin/index.html</code></p>
 
+          <div class="doc-tip warn">
+
+            <strong>🔐 必须设置访问口令</strong>
+
+            第一次访问会被跳转到 <code>setup.html</code> 初始化向导，要求你设置 6 位以上的访问口令。口令经 SHA-256 哈希后存到 <code>data/admin_auth.json</code>，<strong>原始口令不落盘</strong>。<strong>以后每次重启后第一次打开控制台</strong>都要输入这道口令。
+
+          </div>
+
+          <div class="doc-tip">
+
+            <strong>💡 忘了口令？</strong>停掉 bot 进程，删掉 <code>data/admin_auth.json</code>，重启后会自动重新走初始化向导。
+
+          </div>
+
           <div class="doc-tip ok">
 
-            <strong>✅ 默认无需登录</strong>
+            <strong>✅ 仅本机暴露</strong>
 
-            后台仅在 <code>127.0.0.1</code> 暴露（不开放外网），如果是从其他机器访问，需要 SSH 端口转发或自行加鉴权。
+            后台仅在 <code>127.0.0.1</code> 暴露（不开放外网），如果要从其他机器访问，需要 SSH 端口转发或自行加鉴权。
 
           </div>
 
@@ -12292,6 +12827,8 @@ C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe bot.py</div>
 
             <tr><td>今日运势</td><td><code>运势 白羊座</code> / <code>运势 aries</code> / <code>星座运势</code></td></tr>
 
+            <tr><td>今日老婆</td><td><code>今日老婆</code> / <code>抽老婆</code> / <code>wife</code>（按用户+日期固定随机，每日刷新）</td></tr>
+
           </table>
 
         </div>
@@ -12378,7 +12915,7 @@ C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe bot.py</div>
 
             <tr><td><code>章节 三国演义</code></td><td>列目录</td></tr>
 
-            <tr><td>阅读中：<code>下一章</code> / <code>上一章</code> / <code>退出</code></td><td>翻页按钮</td></tr>
+            <tr><td>阅读中：<code>上一章</code> / <code>下一章</code> / <code>目录</code> / <code>返回书库</code> / <code>退出</code></td><td>阅读控制按钮</td></tr>
 
           </table>
 
@@ -13019,7 +13556,7 @@ C:\Users\123\AppData\Local\Programs\Python\Python311\python.exe bot.py</div>
 
             <h1>常见问题排查</h1>
 
-            <p>10 类高频问题 + 自助排查步骤，按症状对号入座。</p>
+            <p>12 类高频问题 + 自助排查步骤，按症状对号入座。</p>
 
           </div>
 
@@ -13173,7 +13710,11 @@ Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden</div>
 
             <li><strong>消息记录</strong>：默认保留 7 天，可在 console_server.py 调整</li>
 
-            <li><strong>签到数据</strong>：SQLite <code>data/checkin.db</code>，删掉即丢失所有积分</li>
+            <li><strong>签到数据</strong>：JSON 文件 <code>data/checkin_data.json</code>，删掉即丢失所有积分</li>
+
+            <li><strong>机器人凭证</strong>：<code>data/bots.json</code>，删掉会清空所有机器人列表（modules/config.py 里的 APPID/SECRET 仍可作为种子重启时被重新写入）</li>
+
+            <li><strong>访问口令</strong>：<code>data/admin_auth.json</code>，删掉后下次启动重新走初始化向导</li>
 
             <li><strong>小说数据</strong>：<code>data/classic_novels.json</code>，手动备份即可</li>
 
@@ -13185,7 +13726,7 @@ Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden</div>
 
             <strong>⚠️ 重要</strong>
 
-            缓存清理（§13 功能）只清理白名单内 8 类文件，**绝不可能误删任何数据 / 配置 JSON**。
+            缓存清理（§13 功能）只清理白名单内 8 类文件，<strong>绝不可能误删任何数据 / 配置 JSON</strong>。
 
           </div>
 
@@ -13231,7 +13772,58 @@ Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden</div>
 
         <div class="doc-section">
 
-          <h2><span class="num">10</span>仍然无法解决</h2>
+          <h2><span class="num">10</span>我明明没配置机器人，管理后台却出现了一个</h2>
+
+          <p>这是 bot 启动时的<strong>种子机制</strong>在起作用：</p>
+
+          <ul>
+
+            <li>如果 <code>data/bots.json</code> 不存在，bot 会从 <code>modules/config.py</code> 里的 <code>APPID</code> / <code>SECRET</code> 复制一份作为「默认机器人」写入 <code>data/bots.json</code>，方便单机器人用户零迁移成本地运行</li>
+
+            <li>所以哪怕你没主动添加，<code>modules/config.py</code> 里只要 <code>APPID</code> / <code>SECRET</code> 不为空，后台就会自动显示这一条</li>
+
+          </ul>
+
+          <p><strong>清空方法</strong>（三步）：</p>
+
+          <div class="doc-code"># 1) 停掉 bot 进程
+taskkill /F /IM python.exe
+
+# 2) 把 modules/config.py 顶部的 APPID / SECRET 改成空串
+APPID  = ""
+SECRET = ""
+
+# 3) 删除 data/bots.json（下次启动如果 config.py 还是空，列表就是空的）
+del data\bots.json
+
+# 4) 重新启动
+python bot.py</div>
+
+          <p>启动后日志里看到「<strong>尚未启用任何 QQ 机器人。请在控制台菜单『机器人管理』中添加凭证并启用，控制台将自动连接。</strong>」即代表清空成功。</p>
+
+        </div>
+
+
+
+        <div class="doc-section">
+
+          <h2><span class="num">11</span>忘记控制台访问口令</h2>
+
+          <p>控制台口令以 SHA-256 哈希存到 <code>data/admin_auth.json</code>，原始口令不落盘，没法找回，只能重置。</p>
+
+          <div class="doc-code">taskkill /F /IM python.exe
+del data\admin_auth.json
+python bot.py</div>
+
+          <p>下次启动会自动跳到 <code>setup.html</code> 初始化向导，重新设口令。</p>
+
+        </div>
+
+
+
+        <div class="doc-section">
+
+          <h2><span class="num">12</span>仍然无法解决</h2>
 
           <ol>
 
@@ -13271,12 +13863,43 @@ Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden</div>
 
             <h1>更新日志</h1>
 
-            <p>2026-08-12 · 累计 30+ 项功能上线 / 修复；最新常驻：v2026.08.12</p>
+            <p>2026-08-20 · 累计 30+ 项功能上线 / 修复；最新常驻：v2026.08.20</p>
 
           </div>
 
         </div>
 
+
+
+
+        <div class="doc-section">
+
+          <h2><span class="num">📘</span>2026-08-20 (今日)</h2>
+
+          <div class="doc-tags">
+            <span class="doc-tag ok">文档</span>
+            <span class="doc-tag">纠错</span>
+            <span class="doc-tag">README</span>
+            <span class="doc-tag">FAQ</span>
+          </div>
+
+          <ul>
+            <li><strong>控制台内「说明文档」整体校对</strong>：
+              <ul>
+                <li>修正「安装部署 §3.2」：原写「编辑 bot.py 顶部的 <code>BOT_CONFIGS</code>」与「持久化到 <code>data/bot_config.json</code>」均与项目实际不符，已改为「<code>modules/config.py</code> + <code>data/bots.json</code>」，并加上 <code>config.yaml</code> 仅作占位的提示</li>
+                <li>修正「安装部署 §3.3」：补充「先停旧进程 → 清 <code>__pycache__</code> → <code>python bot.py</code>」三步启动流程，并提醒 <code>go.cmd</code> 双击会闪退</li>
+                <li>修正「安装部署 §4」：原写「默认无需登录」是错的，已改为「必须设置访问口令」+「忘口令删 <code>data/admin_auth.json</code>」</li>
+                <li>修正「机器人概览 §2」：架构流程图从「14 个模块」改为「11 个内置功能 + 52 个外置插件」</li>
+                <li>新增「常见问题 §10」：解释「我明明没配置机器人却出现一个」的种子机制及三步清空法</li>
+                <li>新增「常见问题 §11」：解释「忘控制台访问口令怎么办」</li>
+                <li>修正「常见问题 §7」：签到数据从「SQLite <code>data/checkin.db</code>」改为「JSON <code>data/checkin_data.json</code>」</li>
+                <li>修正「初始化向导」：原写「PSKDF2 加密哈希」是错的，已改为「SHA-256」</li>
+              </ul>
+            </li>
+            <li><strong>项目根 README 同步重写</strong>：突出「<code>config.yaml</code> 没人读」警示，并新增「清空 / 重新初始化」章节（与本次控制台文档口径一致）</li>
+          </ul>
+
+        </div>
 
 
 
@@ -13796,10 +14419,55 @@ Start-Process python -ArgumentList "bot.py" -WindowStyle Hidden</div>
 
 
 
+    <!-- ============ 修改访问口令 ============ -->
+    <div class="modal-overlay" id="changepass-modal" style="display:none;">
+      <div class="modal" style="width:420px;max-width:92vw;">
+        <div class="modal-head" style="display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--rule);">
+          <h3 id="changepass-modal-title" style="margin:0;font-size:16px;font-weight:600;color:var(--ink);">🔑 修改访问口令</h3>
+          <button class="modal-close" id="changepass-modal-close" type="button">&times;</button>
+        </div>
+        <div class="modal-body" style="padding:22px 24px 8px;">
+          <div id="changepass-remind" style="display:none;padding:6px 0;color:var(--warn);font-size:13.5px;line-height:1.7;">
+            暂未设置访问口令。请先通过初始化向导设置访问口令，或联系已设置口令的管理员处理。
+          </div>
+          <div id="changepass-form">
+            <div class="form-row" style="margin-bottom:14px;">
+              <label style="display:block;font-size:13px;color:var(--muted);margin-bottom:6px;">当前访问口令</label>
+              <input class="form-input" id="changepass-current" type="password" inputmode="numeric" placeholder="请输入当前口令" maxlength="64" style="width:100%;padding:11px 13px;border:1px solid var(--rule);border-radius:10px;font-size:15px;letter-spacing:2px;outline:none;" />
+            </div>
+            <div class="form-row" style="margin-bottom:14px;">
+              <label style="display:block;font-size:13px;color:var(--muted);margin-bottom:6px;">新访问口令（6 位数字）</label>
+              <input class="form-input" id="changepass-new" type="password" inputmode="numeric" placeholder="6 位数字" maxlength="6" style="width:100%;padding:11px 13px;border:1px solid var(--rule);border-radius:10px;font-size:15px;letter-spacing:2px;outline:none;" />
+            </div>
+            <div class="form-row" style="margin-bottom:6px;">
+              <label style="display:block;font-size:13px;color:var(--muted);margin-bottom:6px;">确认新访问口令</label>
+              <input class="form-input" id="changepass-confirm" type="password" inputmode="numeric" placeholder="再次输入" maxlength="6" style="width:100%;padding:11px 13px;border:1px solid var(--rule);border-radius:10px;font-size:15px;letter-spacing:2px;outline:none;" />
+            </div>
+            <div id="changepass-msg" style="min-height:18px;margin-top:10px;font-size:13px;font-weight:600;"></div>
+          </div>
+        </div>
+        <div class="modal-foot" id="changepass-foot" style="display:flex;justify-content:flex-end;gap:10px;padding:14px 16px;border-top:1px solid var(--rule);">
+          <button class="btn btn-ghost" id="changepass-cancel" type="button">取消</button>
+          <button class="btn btn-primary" id="changepass-submit" type="button">保存修改</button>
+        </div>
+      </div>
+    </div>
+
 <script src="./_shared/js/echarts.min.js"></script>
-
-<script src="assets/charts.js?v=20260812r"></script>
-
+<link rel="stylesheet" href="assets/plugin-center.css?v=20260820a">
+<script src="assets/charts.js?v=20260819a"></script>
+<script src="assets/plugin-center.js?v=20260820a"></script>
+<script src="assets/anime.min.js?v=20260817"></script>
+<script src="assets/motion.js?v=20260817a"></script>
+<link rel="stylesheet" href="assets/feature-menu.css?v=20260820b">
+<script src="assets/feature-menu.js?v=20260820b"></script>
+<style id="motion-style">
+  /* 控制台动效增强（anime.js）：仅过渡 anime 不处理的属性，避免与入场动画冲突 */
+  .btn, button, .kpi, .card, .panel, .nav-link, .nav-group-title, a {
+    transition: box-shadow .22s ease, background-color .2s ease, border-color .2s ease, color .18s ease;
+  }
+  html { scroll-behavior: smooth; }
+</style>
 <script>
 
 /* 问题反馈页：主 CTA 按钮 → 新窗口打开 docs.qq.com 登录（first-party cookie 存得下） */
@@ -13809,15 +14477,941 @@ document.addEventListener('DOMContentLoaded', function () {
   var ctaBtn = document.getElementById('feedback-cta-btn');
 
   if (ctaBtn) ctaBtn.addEventListener('click', function () {
-
-    window.open('https://docs.qq.com', '_blank', 'noopener,noreferrer');
-
+      window.open('https://docs.qq.com', '_blank', 'noopener,noreferrer');
+    });
   });
-
-});
 
 </script>
 
+<script>
+/* ============================================================
+ *  启动时拉取 /api/admin/brand，动态更新侧边栏 logo + 标题
+ *  - title 限制 64 字符
+ *  - logo 可以是 http(s) URL 或 data:image/... base64
+ *  - logo 加载失败时自动降级为默认 ../assets/menu_banner.jpg
+ * ============================================================ */
+(function () {
+  function applyBrand(brand) {
+    try {
+      var nameEl = document.getElementById('sidebar-brand-name');
+      var logoEl = document.getElementById('sidebar-brand-logo');
+      if (!nameEl || !logoEl) return;
+      if (brand && brand.title) {
+        nameEl.textContent = String(brand.title).slice(0, 64);
+        // 同步页面 title（保留后缀「· 小流萤管理后台」）
+        try {
+          var baseTitle = String(brand.title);
+          document.title = baseTitle + (baseTitle.indexOf('管理后台') >= 0 ? '' : '');
+        } catch (e) { /* 忽略 */ }
+      }
+      if (brand && brand.logo) {
+        var url = String(brand.logo);
+        // 测试图能不能加载；失败回退默认
+        var test = new Image();
+        test.onload = function () { logoEl.src = url; };
+        test.onerror = function () { /* 保留默认 src */ };
+        test.src = url;
+      }
+    } catch (e) {
+      try { console.warn('applyBrand 失败:', e); } catch (_) {}
+    }
+  }
+
+  function loadBrand() {
+    fetch('/api/admin/brand', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.ok) applyBrand(j);
+      })
+      .catch(function (e) {
+        try { console.warn('加载品牌信息失败:', e); } catch (_) {}
+      });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', loadBrand);
+  } else {
+    loadBrand();
+  }
+
+  // 暴露给个性化设置页保存后立即刷新
+  window.__xfyRefreshBrand = loadBrand;
+})();
+</script>
+
+<script>
+/* ============================================================
+ *  启动时拉取 /api/admin/music-fm，动态更新流萤FM 标题/副标题/封面
+ *  - 标题模板：纯文本或带 <span>FM</span> 标记
+ *  - 副标题显示在「未在播放/本地音乐」下方
+ *  - 封面可以是 data:image/ base64 或 http(s) URL 或 站内路径 /admin/...
+ * ============================================================ */
+(function () {
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function applyFM(fm) {
+    try {
+      var titleEl = document.getElementById('music-title');
+      var coverEl = document.getElementById('music-cover-img');
+      var subEl = document.getElementById('music-fm-subtitle');
+      if (titleEl && fm && fm.title) {
+        // 支持用 "流萤FM" 写法切分主体与高亮（识别中间的「FM」字样）
+        var t = String(fm.title);
+        var m = t.match(/^(.*?)([A-Za-z\u4e00-\u9fa5]{0,4}FM|FM)(.*)$/i);
+        if (m) {
+          titleEl.innerHTML = escapeHtml(m[1]) + '<span>' + escapeHtml(m[2]) + '</span>' + escapeHtml(m[3]);
+        } else {
+          // 默认前两个字符作为主体，剩余作为高亮
+          if (t.length >= 3) {
+            titleEl.innerHTML = escapeHtml(t.substring(0, t.length - 2)) + '<span>' + escapeHtml(t.substring(t.length - 2)) + '</span>';
+          } else {
+            titleEl.textContent = t;
+          }
+        }
+      }
+      if (coverEl && fm && fm.cover) {
+        var url = String(fm.cover);
+        // 测试图能不能加载；失败回退默认
+        var test = new Image();
+        test.onload = function () { coverEl.src = url; };
+        test.onerror = function () { /* 保留默认 src */ };
+        test.src = url;
+      }
+      if (subEl && fm && fm.subtitle) {
+        subEl.textContent = String(fm.subtitle);
+        subEl.style.display = 'block';
+      }
+    } catch (e) {
+      try { console.warn('applyFM 失败:', e); } catch (_) {}
+    }
+  }
+
+  function loadFM() {
+    fetch('/api/admin/music-fm', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.ok) applyFM(j); })
+      .catch(function (e) { try { console.warn('加载流萤FM配置失败:', e); } catch (_) {} });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', loadFM);
+  } else {
+    loadFM();
+  }
+
+  window.__xfyRefreshFM = loadFM;
+})();
+</script>
+
+<script>
+/* 全局头像兜底：任何头像 <img> 加载失败时，自动降级为容器首字母 / 🤖（不改动各页面已有 onerror 逻辑） */
+document.addEventListener('error', function (e) {
+  var t = e.target;
+  if (!t || t.tagName !== 'IMG') return;
+  var el = t;
+  // 已有 onerror 处理的（浏览器会调用其内联 handler 并返回 true）不再重复处理
+  if (el.hasAttribute('data-avatar-fallback')) return;
+  var wrap = el.closest ? (el.closest('.avatar-wrap, .usr-avatar, .grp-avatar, .bot-selector-avatar, .bot-row-avatar, .matrix-avatar, .jr-avatar, .avatar, .chat-avatar') || el.parentNode) : el.parentNode;
+  if (wrap && wrap !== el) {
+    var initial = '';
+    var nameSrc = el.getAttribute('alt') || el.title || '';
+    if (!nameSrc) {
+      var nameEl = wrap.querySelector && wrap.querySelector('.usr-nick, .grp-name, .bot-selector-name, .bot-row-name, .nick');
+      if (nameEl) nameSrc = nameEl.textContent || '';
+    }
+    nameSrc = String(nameSrc || '').trim();
+    if (nameSrc) initial = nameSrc.slice(0, 1).toUpperCase();
+    if (!initial) { el.style.display = 'none'; }
+    else {
+      el.setAttribute('data-avatar-fallback', '1');
+      el.style.display = 'none';
+      var fb = wrap.querySelector('.avatar-fallback, .bot-row-avatar-fallback');
+      if (fb) { fb.style.display = 'flex'; fb.textContent = initial; }
+      else {
+        var span = document.createElement('span');
+        span.textContent = initial;
+        span.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:13px;font-weight:600;color:var(--muted);';
+        if (wrap.classList) wrap.classList.add('missing');
+        wrap.appendChild(span);
+      }
+    }
+  } else {
+    el.style.display = 'none';
+  }
+}, true);
+</script>
+
+<script>
+/* 修改访问口令：系统指令页「修改访问口令」按钮 + 弹窗逻辑 */
+(function () {
+  var modal = document.getElementById('changepass-modal');
+  if (!modal) return;
+  var btnOpen = document.getElementById('admin-cmd-changepass');
+  var btnClose = document.getElementById('changepass-modal-close');
+  var btnCancel = document.getElementById('changepass-cancel');
+  var btnSubmit = document.getElementById('changepass-submit');
+  var elRemind = document.getElementById('changepass-remind');
+  var elForm = document.getElementById('changepass-form');
+  var elMsg = document.getElementById('changepass-msg');
+  var inpCur = document.getElementById('changepass-current');
+  var inpNew = document.getElementById('changepass-new');
+  var inpConfirm = document.getElementById('changepass-confirm');
+
+  function showMsg(text, ok) {
+    elMsg.textContent = text || '';
+    elMsg.style.color = ok ? 'var(--green)' : 'var(--warn)';
+  }
+
+  function openModal() {
+    showMsg('');
+    inpCur.value = ''; inpNew.value = ''; inpConfirm.value = '';
+    btnSubmit.disabled = false; btnSubmit.textContent = '保存修改';
+    refreshPassState();
+    fetch('/api/console/password-status', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.set) {
+          elRemind.style.display = 'none';
+          elForm.style.display = '';
+          btnSubmit.style.display = '';
+        } else {
+          elRemind.style.display = '';
+          elForm.style.display = 'none';
+          btnSubmit.style.display = 'none';
+        }
+      })
+      .catch(function () {
+        elRemind.style.display = 'none';
+        elForm.style.display = '';
+        btnSubmit.style.display = '';
+      });
+    modal.style.display = 'flex';
+    modal.classList.add('show', 'active');
+    if (inpCur) setTimeout(function () { try { inpCur.focus(); } catch (e) {} }, 60);
+  }
+
+  // 系统指令页顶部：访问口令状态提示
+  var passStateEl = document.getElementById('admin-cmd-pass-state');
+  function refreshPassState() {
+    if (!passStateEl) return;
+    fetch('/api/console/password-status', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.set) {
+          passStateEl.textContent = '已设置 ✓';
+          passStateEl.style.color = 'var(--green)';
+        } else {
+          passStateEl.textContent = '暂未设置（请通过初始化向导设置）';
+          passStateEl.style.color = 'var(--warn)';
+        }
+      })
+      .catch(function () {
+        passStateEl.textContent = '未知';
+        passStateEl.style.color = 'var(--muted)';
+      });
+  }
+  refreshPassState();
+
+  function closeModal() {
+    modal.style.display = 'none';
+    modal.classList.remove('show', 'active');
+  }
+
+  if (btnOpen) btnOpen.addEventListener('click', openModal);
+  if (btnClose) btnClose.addEventListener('click', closeModal);
+  if (btnCancel) btnCancel.addEventListener('click', closeModal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && modal.style.display === 'flex') closeModal(); });
+
+  if (btnSubmit) btnSubmit.addEventListener('click', function () {
+    var cur = (inpCur.value || '').trim();
+    var nw = (inpNew.value || '').trim();
+    var cf = (inpConfirm.value || '').trim();
+    showMsg('');
+    if (!cur) { showMsg('请输入当前访问口令'); return; }
+    if (!/^\d{6}$/.test(nw)) { showMsg('新访问口令须为 6 位数字'); return; }
+    if (nw !== cf) { showMsg('两次输入的新访问口令不一致'); return; }
+    btnSubmit.disabled = true; btnSubmit.textContent = '保存中…';
+    fetch('/api/console/change-password', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: cur, new_password: nw, confirm: cf })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.ok && res.j && res.j.ok) {
+          showMsg('访问口令已修改，机器人即将重启，请稍后用新口令登录…', true);
+          btnSubmit.textContent = '已保存';
+          setTimeout(function () { window.location.replace('/admin/index.html'); }, 6500);
+        } else {
+          btnSubmit.disabled = false; btnSubmit.textContent = '保存修改';
+          showMsg((res.j && res.j.error) ? res.j.error : '修改失败，请重试');
+        }
+      })
+      .catch(function () {
+        btnSubmit.disabled = false; btnSubmit.textContent = '保存修改';
+        showMsg('请求失败，请重试');
+      });
+  });
+})();
+</script>
+
+<!-- ====== 控制台流萤特效（仅个性设置为默认白底 #f4f6fa 时生效）====== -->
+<div id="ff-console" class="ff-console" aria-hidden="true">
+  <canvas id="ff-console-canvas" class="ff-console-canvas"></canvas>
+  <div class="ff-top" aria-hidden="true"></div>
+  <div class="ff-waves" aria-hidden="true">
+    <svg class="waves" viewBox="0 24 150 28" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <defs><path id="ff-gentle-wave" d="M-160 44c30 0 58-18 88-18s 58 18 88 18 58-18 88-18 58 18 88 18 v48h-352z"/></defs>
+      <g class="parallax">
+        <use xlink:href="#ff-gentle-wave" x="48" y="0" class="ff-w-op1"></use>
+        <use xlink:href="#ff-gentle-wave" x="48" y="3" class="ff-w-op2"></use>
+        <use xlink:href="#ff-gentle-wave" x="48" y="5" class="ff-w-op3"></use>
+        <use xlink:href="#ff-gentle-wave" x="48" y="7" class="ff-w-op4"></use>
+      </g>
+    </svg>
+  </div>
+</div>
+
+<style id="firefly-console-style">
+/* 流萤容器：固定全屏、置于内容之下（z-index:-1 落在 body 背景之上、卡片之下） */
+.ff-console { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+.ff-console-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* 顶部渐变高光（移植 F-Blog .top-gradient-highlight） */
+.ff-top { position: absolute; left: 0; right: 0; top: 0; height: 150px;
+  background: linear-gradient(to bottom, rgba(46,230,170,0.12) 0%, rgba(46,230,170,0.05) 40%, transparent 100%); }
+/* F-Blog 波浪：底部绿色 horizon（与初始化页不同的签名元素） */
+.ff-waves { position: absolute; left: 0; bottom: 0; width: 100%; height: 14vh; min-height: 90px; max-height: 160px; }
+.ff-waves svg { width: 100%; height: 100%; display: block; transform: translateZ(0); }
+.ff-waves .parallax use { animation: ff-wave 25s cubic-bezier(0.5,0.5,0.45,0.5) infinite; fill: rgba(46,230,170,0.16); }
+.ff-waves .parallax use.ff-w-op2 { fill: rgba(46,230,170,0.12); }
+.ff-waves .parallax use.ff-w-op3 { fill: rgba(46,230,170,0.08); }
+.ff-waves .parallax use.ff-w-op4 { fill: rgba(46,230,170,0.05); }
+.ff-waves .parallax use:nth-child(1){ animation-delay:-2s; animation-duration:7s; }
+.ff-waves .parallax use:nth-child(2){ animation-delay:-3s; animation-duration:10s; }
+.ff-waves .parallax use:nth-child(3){ animation-delay:-4s; animation-duration:13s; }
+.ff-waves .parallax use:nth-child(4){ animation-delay:-5s; animation-duration:20s; }
+@keyframes ff-wave { 0%{ transform: translate3d(-90px,0,0); } 100%{ transform: translate3d(85px,0,0); } }
+/* 关闭态：个性设置背景非默认白底（或深色主题）时隐藏流萤 */
+body.ff-off .ff-console { display: none !important; }
+</style>
+
+<script>
+/* 控制台流萤特效 + 个性设置背景应用 / 流萤门控 */
+(function () {
+  var root = document.documentElement;
+  var body = document.body;
+  var DEFAULT_BG = '#f4f6fa';
+  var LS_BG = 'xfy_console_bg';
+  var LS_LAYOUT = 'xfy_console_layout_swap';
+
+  function normHex(v) {
+    if (!v) return '';
+    v = String(v).trim();
+    if (/^#([0-9a-fA-F]{6})$/.test(v)) return v.toLowerCase();
+    if (/^#([0-9a-fA-F]{3})$/.test(v)) {
+      return '#' + v.slice(1).split('').map(function (c) { return c + c; }).join('').toLowerCase();
+    }
+    return '';
+  }
+
+  function isDefaultBg() {
+    var v = getComputedStyle(root).getPropertyValue('--bg').trim().toLowerCase();
+    return v === DEFAULT_BG || v === '';
+  }
+
+  function shouldShowFirefly() {
+    if (body.classList.contains('dark-mode')) return false;
+    return isDefaultBg();
+  }
+
+  function updateFireflyGate() {
+    if (shouldShowFirefly()) body.classList.remove('ff-off');
+    else body.classList.add('ff-off');
+  }
+
+  function applyBg(hex) {
+    if (hex) root.style.setProperty('--bg', hex);
+    else root.style.removeProperty('--bg');
+    updateFireflyGate();
+  }
+
+  /* ---------- 个性设置：背景色 ---------- */
+  var colorInput = document.getElementById('personalize-color-input');
+  var hexInput = document.getElementById('personalize-hex-input');
+  var applyBtn = document.getElementById('personalize-apply-btn');
+  var saveBtn = document.getElementById('personalize-save-btn');
+  var resetBtn = document.getElementById('personalize-reset-btn');
+  var presets = document.getElementById('personalize-presets');
+  var curDot = document.getElementById('personalize-current-dot');
+  var curVal = document.getElementById('personalize-current-value');
+
+  function refreshCurrent(hex) {
+    var v = hex || DEFAULT_BG;
+    if (curDot) curDot.style.background = v;
+    if (curVal) curVal.textContent = v.toUpperCase();
+  }
+  function setColorInputs(hex) {
+    var v = hex || DEFAULT_BG;
+    if (colorInput) colorInput.value = v;
+    if (hexInput) hexInput.value = v.toUpperCase();
+    refreshCurrent(v);
+  }
+  function livePreview(hex) { applyBg(hex); refreshCurrent(hex); }
+  function readInputHex() {
+    return normHex((hexInput && hexInput.value) || (colorInput && colorInput.value) || '');
+  }
+
+  var savedBg = '';
+  try { savedBg = localStorage.getItem(LS_BG) || ''; } catch (e) {}
+  savedBg = normHex(savedBg);
+  if (savedBg && savedBg !== DEFAULT_BG) { applyBg(savedBg); setColorInputs(savedBg); }
+  else { applyBg(''); setColorInputs(DEFAULT_BG); }
+
+  /* 布局互换（侧边栏在右） */
+  var swapChk = document.getElementById('personalize-layout-swap');
+  var appEl = document.querySelector('.app');
+  var savedSwap = '';
+  try { savedSwap = localStorage.getItem(LS_LAYOUT) || ''; } catch (e) {}
+  if (swapChk && appEl) {
+    if (savedSwap === '1') { swapChk.checked = true; appEl.classList.add('sidebar-right'); }
+    swapChk.addEventListener('change', function () {
+      if (swapChk.checked) { appEl.classList.add('sidebar-right'); try { localStorage.setItem(LS_LAYOUT, '1'); } catch (e) {} }
+      else { appEl.classList.remove('sidebar-right'); try { localStorage.setItem(LS_LAYOUT, '0'); } catch (e) {} }
+    });
+  }
+
+  if (colorInput) colorInput.addEventListener('input', function () { var h = normHex(colorInput.value); if (h) livePreview(h); });
+  if (hexInput) hexInput.addEventListener('input', function () { var h = normHex(hexInput.value); if (h) livePreview(h); });
+  if (applyBtn) applyBtn.addEventListener('click', function () { var h = readInputHex(); if (!h) { if (hexInput) hexInput.focus(); return; } livePreview(h); });
+  if (presets) presets.addEventListener('click', function (e) {
+    var p = e.target.closest('.preset'); if (!p) return;
+    var c = p.getAttribute('data-color'); if (!c) return;
+    setColorInputs(c); livePreview(c);
+  });
+  if (saveBtn) saveBtn.addEventListener('click', function () {
+    var h = readInputHex() || DEFAULT_BG;
+    try { if (h === DEFAULT_BG) localStorage.removeItem(LS_BG); else localStorage.setItem(LS_BG, h); } catch (e) {}
+    applyBg(h); refreshCurrent(h);
+    saveBtn.textContent = '已保存';
+    setTimeout(function () { saveBtn.textContent = '保存设置'; }, 1400);
+  });
+
+  /* ---------- 个性设置：品牌信息（侧边栏 Logo + 标题） ---------- */
+  var brandTitleInput = document.getElementById('brand-title-input');
+  var brandLogoInput = document.getElementById('brand-logo-input');
+  var brandLogoFile = document.getElementById('brand-logo-file');
+  var brandSaveBtn = document.getElementById('brand-save-btn');
+  var brandResetBtn = document.getElementById('brand-reset-btn');
+  var brandPreviewLogo = document.getElementById('brand-preview-logo');
+  var brandPreviewName = document.getElementById('brand-preview-name');
+
+  function loadBrandIntoForm() {
+    fetch('/api/admin/brand', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) return;
+        if (brandTitleInput) brandTitleInput.value = j.title || '小流萤管理后台';
+        if (brandLogoInput) brandLogoInput.value = (j.logo && !j.logo.startsWith('data:')) ? j.logo : '';
+        if (brandPreviewName) brandPreviewName.textContent = j.title || '小流萤管理后台';
+        if (brandPreviewLogo && j.logo) brandPreviewLogo.src = j.logo;
+      })
+      .catch(function (e) { try { console.warn(e); } catch (_) {} });
+  }
+  loadBrandIntoForm();
+
+  if (brandTitleInput) {
+    brandTitleInput.addEventListener('input', function () {
+      if (brandPreviewName) brandPreviewName.textContent = brandTitleInput.value || '小流萤管理后台';
+    });
+  }
+  if (brandLogoInput) {
+    brandLogoInput.addEventListener('input', function () {
+      var v = brandLogoInput.value.trim();
+      if (brandPreviewLogo && v) brandPreviewLogo.src = v;
+    });
+  }
+  if (brandLogoFile) {
+    brandLogoFile.addEventListener('change', function () {
+      var f = brandLogoFile.files && brandLogoFile.files[0];
+      if (!f) return;
+      if (f.size > 2 * 1024 * 1024) {
+        alert('图片过大（最大 2MB），请压缩后再上传');
+        brandLogoFile.value = '';
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var dataUrl = String(e.target.result || '');
+        if (brandLogoInput) brandLogoInput.value = '';
+        if (brandPreviewLogo) brandPreviewLogo.src = dataUrl;
+        // 把 base64 data URL 暂存到一个全局变量，等保存时取
+        window.__xfyBrandPendingLogo = dataUrl;
+      };
+      reader.readAsDataURL(f);
+    });
+  }
+  if (brandSaveBtn) {
+    brandSaveBtn.addEventListener('click', function () {
+      var title = (brandTitleInput && brandTitleInput.value || '').trim() || '小流萤管理后台';
+      var logo = (brandLogoInput && brandLogoInput.value || '').trim();
+      // 如果刚上传了文件，用 data URL
+      if (window.__xfyBrandPendingLogo) {
+        logo = window.__xfyBrandPendingLogo;
+        window.__xfyBrandPendingLogo = null;
+      }
+      brandSaveBtn.disabled = true;
+      var oldText = brandSaveBtn.textContent;
+      brandSaveBtn.textContent = '保存中...';
+      fetch('/api/admin/brand', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'save', title: title, logo: logo })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            brandSaveBtn.textContent = '✓ 已保存';
+            if (typeof window.__xfyRefreshBrand === 'function') window.__xfyRefreshBrand();
+            setTimeout(function () { brandSaveBtn.textContent = oldText; brandSaveBtn.disabled = false; }, 1400);
+          } else {
+            brandSaveBtn.textContent = '✗ ' + ((j && j.error) || '保存失败');
+            setTimeout(function () { brandSaveBtn.textContent = oldText; brandSaveBtn.disabled = false; }, 1800);
+          }
+        })
+        .catch(function (e) {
+          brandSaveBtn.textContent = '✗ 网络错误';
+          setTimeout(function () { brandSaveBtn.textContent = oldText; brandSaveBtn.disabled = false; }, 1800);
+        });
+    });
+  }
+  if (brandResetBtn) {
+    brandResetBtn.addEventListener('click', function () {
+      if (!confirm('确定要恢复默认品牌信息吗？\n（标题恢复为「小流萤管理后台」，logo 恢复为默认图片）')) return;
+      fetch('/api/admin/brand', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset' })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            loadBrandIntoForm();
+            if (typeof window.__xfyRefreshBrand === 'function') window.__xfyRefreshBrand();
+          } else {
+            alert('恢复失败：' + ((j && j.error) || '未知错误'));
+          }
+        })
+        .catch(function () { alert('网络错误'); });
+    });
+  }
+
+  /* ---------- 个性设置：流萤FM 设置 ---------- */
+  var fmTitleInput = document.getElementById('fm-title-input');
+  var fmSubtitleInput = document.getElementById('fm-subtitle-input');
+  var fmCoverInput = document.getElementById('fm-cover-input');
+  var fmCoverFile = document.getElementById('fm-cover-file');
+  var fmSaveBtn = document.getElementById('fm-save-btn');
+  var fmResetBtn = document.getElementById('fm-reset-btn');
+  var fmPreviewCoverImg = document.getElementById('fm-preview-cover-img');
+  var fmPreviewTitle = document.getElementById('fm-preview-title');
+  var fmPreviewSubtitle = document.getElementById('fm-preview-subtitle');
+
+  function fmRenderPreview(title, subtitle, cover) {
+    if (fmPreviewTitle) {
+      var t = String(title || '流萤FM');
+      var m = t.match(/^(.*?)([A-Za-z\u4e00-\u9fa5]{0,4}FM|FM)(.*)$/i);
+      if (m) {
+        fmPreviewTitle.innerHTML = escapeHtmlLocal(m[1]) + '<span>' + escapeHtmlLocal(m[2]) + '</span>' + escapeHtmlLocal(m[3]);
+      } else if (t.length >= 3) {
+        fmPreviewTitle.innerHTML = escapeHtmlLocal(t.substring(0, t.length - 2)) + '<span>' + escapeHtmlLocal(t.substring(t.length - 2)) + '</span>';
+      } else {
+        fmPreviewTitle.textContent = t;
+      }
+    }
+    if (fmPreviewSubtitle) {
+      fmPreviewSubtitle.textContent = subtitle || '与流萤一起走在路上';
+    }
+    if (fmPreviewCoverImg && cover) {
+      fmPreviewCoverImg.src = cover;
+    }
+  }
+  function escapeHtmlLocal(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function loadFMIntoForm() {
+    fetch('/api/admin/music-fm', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) return;
+        if (fmTitleInput) fmTitleInput.value = j.title || '流萤FM';
+        if (fmSubtitleInput) fmSubtitleInput.value = j.subtitle || '与流萤一起走在路上';
+        if (fmCoverInput) fmCoverInput.value = (j.cover && !j.cover.startsWith('data:')) ? j.cover : '';
+        fmRenderPreview(j.title, j.subtitle, j.cover);
+      })
+      .catch(function () {});
+  }
+  loadFMIntoForm();
+
+  if (fmTitleInput) {
+    fmTitleInput.addEventListener('input', function () {
+      fmRenderPreview(fmTitleInput.value, fmSubtitleInput && fmSubtitleInput.value, fmPreviewCoverImg && fmPreviewCoverImg.src);
+    });
+  }
+  if (fmSubtitleInput) {
+    fmSubtitleInput.addEventListener('input', function () {
+      if (fmPreviewSubtitle) fmPreviewSubtitle.textContent = fmSubtitleInput.value;
+    });
+  }
+  if (fmCoverInput) {
+    fmCoverInput.addEventListener('input', function () {
+      var v = fmCoverInput.value.trim();
+      if (fmPreviewCoverImg && v) fmPreviewCoverImg.src = v;
+    });
+  }
+  if (fmCoverFile) {
+    fmCoverFile.addEventListener('change', function () {
+      var f = fmCoverFile.files && fmCoverFile.files[0];
+      if (!f) return;
+      if (f.size > 2 * 1024 * 1024) {
+        alert('图片过大（最大 2MB），请压缩后再上传');
+        fmCoverFile.value = '';
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function (e) {
+        var dataUrl = String(e.target.result || '');
+        if (fmCoverInput) fmCoverInput.value = '';
+        if (fmPreviewCoverImg) fmPreviewCoverImg.src = dataUrl;
+        window.__xfyFMPendingCover = dataUrl;
+      };
+      reader.readAsDataURL(f);
+    });
+  }
+  if (fmSaveBtn) {
+    fmSaveBtn.addEventListener('click', function () {
+      var title = (fmTitleInput && fmTitleInput.value || '').trim() || '流萤FM';
+      var subtitle = (fmSubtitleInput && fmSubtitleInput.value || '').trim() || '与流萤一起走在路上';
+      var cover = (fmCoverInput && fmCoverInput.value || '').trim();
+      if (window.__xfyFMPendingCover) {
+        cover = window.__xfyFMPendingCover;
+        window.__xfyFMPendingCover = null;
+      }
+      fmSaveBtn.disabled = true;
+      var oldText = fmSaveBtn.textContent;
+      fmSaveBtn.textContent = '保存中...';
+      fetch('/api/admin/music-fm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'save', title: title, subtitle: subtitle, cover: cover })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            fmSaveBtn.textContent = '✓ 已保存';
+            if (typeof window.__xfyRefreshFM === 'function') window.__xfyRefreshFM();
+            setTimeout(function () { fmSaveBtn.textContent = oldText; fmSaveBtn.disabled = false; }, 1400);
+          } else {
+            fmSaveBtn.textContent = '✗ ' + ((j && j.error) || '保存失败');
+            setTimeout(function () { fmSaveBtn.textContent = oldText; fmSaveBtn.disabled = false; }, 1800);
+          }
+        })
+        .catch(function () {
+          fmSaveBtn.textContent = '✗ 网络错误';
+          setTimeout(function () { fmSaveBtn.textContent = oldText; fmSaveBtn.disabled = false; }, 1800);
+        });
+    });
+  }
+  if (fmResetBtn) {
+    fmResetBtn.addEventListener('click', function () {
+      if (!confirm('确定要恢复默认流萤FM配置吗？\n（标题恢复为「流萤FM」，副标题恢复为「与流萤一起走在路上」，封面恢复为默认图片）')) return;
+      fetch('/api/admin/music-fm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset' })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (j && j.ok) {
+            loadFMIntoForm();
+            if (typeof window.__xfyRefreshFM === 'function') window.__xfyRefreshFM();
+          } else {
+            alert('恢复失败：' + ((j && j.error) || '未知错误'));
+          }
+        })
+        .catch(function () { alert('网络错误'); });
+    });
+  }
+
+  if (resetBtn) resetBtn.addEventListener('click', function () {
+    try { localStorage.removeItem(LS_BG); } catch (e) {}
+    applyBg(''); setColorInputs(DEFAULT_BG);
+  });
+
+  /* ---------- 流萤 Canvas 特效（F-Blog 风格：少量稀疏飘移萤光，与初始化页不同） ---------- */
+  var ffCanvas = document.getElementById('ff-console-canvas');
+  if (ffCanvas && !body.classList.contains('ff-off') && typeof window.matchMedia === 'function' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    var fctx = ffCanvas.getContext('2d');
+    var fW = 0, fH = 0, fdpr = Math.min(window.devicePixelRatio || 1, 2);
+    var fCOL = ['46,230,170', '170,255,215', '22,200,140'];
+    var fFlies = [];
+    function fResize(){
+      fW = window.innerWidth; fH = window.innerHeight;
+      ffCanvas.width = Math.max(1, Math.floor(fW * fdpr));
+      ffCanvas.height = Math.max(1, Math.floor(fH * fdpr));
+      fctx.setTransform(fdpr, 0, 0, fdpr, 0, 0);
+    }
+    fResize();
+    window.addEventListener('resize', fResize);
+    function fSpawn(){
+      var n = Math.max(10, Math.min(16, Math.round(fW / 130)));
+      fFlies = [];
+      for (var i = 0; i < n; i++){
+        fFlies.push({
+          x: Math.random()*fW, y: Math.random()*fH,
+          r: 1.0 + Math.random()*1.8,
+          vx: (Math.random()-0.5)*0.22, vy: (Math.random()-0.5)*0.22 - 0.04,
+          ph: Math.random()*Math.PI*2, sp: 0.4 + Math.random()*0.9,
+          col: fCOL[i % fCOL.length]
+        });
+      }
+    }
+    fSpawn();
+    var fLast = 0;
+    function fDraw(t){
+      if (body.classList.contains('ff-off')) { fctx.clearRect(0,0,fW,fH); requestAnimationFrame(fDraw); return; }
+      if (t - fLast < 33){ requestAnimationFrame(fDraw); return; }
+      fLast = t;
+      fctx.clearRect(0,0,fW,fH);
+      for (var i = 0; i < fFlies.length; i++){
+        var f = fFlies[i];
+        f.ph += 0.011 * f.sp;
+        f.x += f.vx + Math.cos(f.ph)*0.14;
+        f.y += f.vy + Math.sin(f.ph*0.7)*0.12;
+        if(f.x < -20) f.x = fW+20; if(f.x > fW+20) f.x = -20;
+        if(f.y < -20) f.y = fH+20; if(f.y > fH+20) f.y = -20;
+        var tw = 0.28 + 0.45*(0.5 + 0.5*Math.sin(f.ph*1.6));
+        var rad = f.r * (1 + 0.22*Math.sin(f.ph*1.2));
+        var g = fctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, rad*5);
+        g.addColorStop(0, 'rgba('+f.col+','+tw.toFixed(3)+')');
+        g.addColorStop(1, 'rgba('+f.col+',0)');
+        fctx.fillStyle = g;
+        fctx.beginPath(); fctx.arc(f.x, f.y, rad*5, 0, Math.PI*2); fctx.fill();
+        fctx.fillStyle = 'rgba('+f.col+','+Math.min(1, tw+0.16).toFixed(3)+')';
+        fctx.beginPath(); fctx.arc(f.x, f.y, rad*0.55, 0, Math.PI*2); fctx.fill();
+      }
+      requestAnimationFrame(fDraw);
+    }
+    requestAnimationFrame(fDraw);
+  }
+})();
+</script>
+
+
+
+<!-- 控制台音乐播放器 -->
+<div class="music-player" id="music-player">
+  <div class="music-tab" id="music-tab" title="展开音乐播放器">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+  </div>
+  <div class="music-panel">
+    <div class="music-header">
+      <div class="music-title" id="music-title">流萤<span>FM</span></div>
+      <button class="music-close" id="music-close" aria-label="收起" title="收起">×</button>
+    </div>
+    <div class="music-cover" id="music-cover">
+      <img id="music-cover-img" src="/admin/assets/music/cover.png" alt="唱片封面"/>
+    </div>
+    <div class="music-info">
+      <div class="music-song" id="music-song">未在播放</div>
+      <div class="music-artist" id="music-artist">本地音乐</div>
+      <div class="music-fm-subtitle" id="music-fm-subtitle" style="display:none;"></div>
+    </div>
+    <div class="music-controls">
+      <button class="music-btn" id="music-prev" title="上一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5-6v12z"/></svg></button>
+      <button class="music-btn primary" id="music-play" title="播放/暂停"><svg viewBox="0 0 24 24" fill="currentColor" id="music-play-icon"><path d="M8 5v14l11-7z"/></svg></button>
+      <button class="music-btn" id="music-next" title="下一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6z"/></svg></button>
+    </div>
+    <div class="music-progress">
+      <span id="music-cur">0:00</span>
+      <input type="range" id="music-seek" value="0" min="0" max="100" step="0.1"/>
+      <span id="music-dur">0:00</span>
+    </div>
+    <div class="music-vol">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted)"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+      <input type="range" id="music-vol" value="80" min="0" max="100" step="1"/>
+    </div>
+    <div class="music-actions">
+      <button class="btn" id="music-loop" title="循环模式">顺序播放</button>
+      <button class="btn" id="music-upload-btn" title="上传音乐">上传音乐</button>
+      <input type="file" class="music-upload" id="music-upload" accept="audio/*"/>
+    </div>
+    <div class="music-section-title">播放列表</div>
+    <div class="music-list" id="music-list"><div class="music-empty">暂无音乐，点击「上传音乐」添加。</div></div>
+  </div>
+  <audio id="music-audio" crossorigin="anonymous"></audio>
+</div>
+<script>
+  // ---------- 控制台音乐播放器 ----------
+  document.addEventListener('DOMContentLoaded', function() {
+    (function musicPlayer(){
+      var wrap = document.getElementById('music-player');
+      var tab = document.getElementById('music-tab');
+      var close = document.getElementById('music-close');
+      var audio = document.getElementById('music-audio');
+      var cover = document.getElementById('music-cover');
+      var songEl = document.getElementById('music-song');
+      var artistEl = document.getElementById('music-artist');
+      var playBtn = document.getElementById('music-play');
+      var playIcon = document.getElementById('music-play-icon');
+      var prevBtn = document.getElementById('music-prev');
+      var nextBtn = document.getElementById('music-next');
+      var seek = document.getElementById('music-seek');
+      var curEl = document.getElementById('music-cur');
+      var durEl = document.getElementById('music-dur');
+      var vol = document.getElementById('music-vol');
+      var loopBtn = document.getElementById('music-loop');
+      var uploadBtn = document.getElementById('music-upload-btn');
+      var uploadInput = document.getElementById('music-upload');
+      var listEl = document.getElementById('music-list');
+
+      var list = [];
+      var idx = -1;
+      var loop = 'order';
+      var isSeeking = false;
+
+      function toggle(){ wrap.classList.toggle('open'); }
+      tab.addEventListener('click', toggle);
+      close.addEventListener('click', toggle);
+
+      function format(t){
+        if(!isFinite(t) || t < 0) return '0:00';
+        var m = Math.floor(t/60), s = Math.floor(t%60);
+        return m + ':' + (s<10?'0':'') + s;
+      }
+      function renderPlay(playing){
+        cover.classList.toggle('playing', playing);
+        playIcon.innerHTML = playing ? '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>' : '<path d="M8 5v14l11-7z"/>';
+      }
+      function loadSong(i){
+        if(!list.length) return;
+        if(i<0) i=list.length-1; else if(i>=list.length) i=0;
+        idx = i;
+        audio.src = list[i].url;
+        songEl.textContent = list[i].name.replace(/\.[^/.]+$/, '');
+        artistEl.textContent = '本地音乐 · ' + list.length + ' 首';
+        renderList();
+        var playPromise = audio.play();
+        if(playPromise && playPromise.catch) playPromise.catch(function(){});
+      }
+      function nextSong(){
+        if(!list.length) return;
+        if(loop==='random'){ idx = Math.floor(Math.random()*list.length); }
+        else { idx = (idx+1)%list.length; }
+        loadSong(idx);
+      }
+      function prevSong(){
+        if(!list.length) return;
+        idx = (idx-1+list.length)%list.length;
+        loadSong(idx);
+      }
+      playBtn.addEventListener('click', function(){ if(!audio.src && list.length){ loadSong(0); return; } if(audio.paused){ audio.play(); } else { audio.pause(); } });
+      nextBtn.addEventListener('click', nextSong);
+      prevBtn.addEventListener('click', prevSong);
+      audio.addEventListener('play', function(){ renderPlay(true); });
+      audio.addEventListener('pause', function(){ renderPlay(false); });
+      audio.addEventListener('timeupdate', function(){
+        if(!isFinite(audio.duration)) return;
+        curEl.textContent = format(audio.currentTime);
+        if(!isSeeking) seek.value = audio.duration ? (audio.currentTime/audio.duration*100) : 0;
+      });
+      audio.addEventListener('loadedmetadata', function(){ durEl.textContent = format(audio.duration); });
+      audio.addEventListener('ended', function(){ if(loop==='loop'){ audio.currentTime=0; audio.play(); } else { nextSong(); } });
+      seek.addEventListener('input', function(){ isSeeking=true; if(isFinite(audio.duration)) curEl.textContent = format(audio.duration*(seek.value/100)); });
+      seek.addEventListener('change', function(){ isSeeking=false; if(isFinite(audio.duration)) audio.currentTime = audio.duration*(seek.value/100); });
+      vol.addEventListener('input', function(){ audio.volume = vol.value/100; });
+      audio.volume = vol.value/100;
+      var loopLabels = {'order':'顺序播放','loop':'单曲循环','random':'随机播放'};
+      loopBtn.addEventListener('click', function(){
+        var modes = ['order','loop','random'];
+        loop = modes[(modes.indexOf(loop)+1)%modes.length];
+        loopBtn.textContent = loopLabels[loop];
+        loopBtn.classList.toggle('loop-on', loop!=='order');
+      });
+      uploadBtn.addEventListener('click', function(){ uploadInput.click(); });
+      uploadInput.addEventListener('change', function(){
+        var file = uploadInput.files[0];
+        if(!file) return;
+        var ext = file.name.split('.').pop().toLowerCase();
+        var allowed = ['mp3','wav','m4a','ogg','flac','aac','wma'];
+        if(allowed.indexOf(ext)<0){ alert('仅支持 ' + allowed.join('/')); return; }
+        var reader = new FileReader();
+        reader.onload = function(e){
+          uploadBtn.textContent = '上传中…';
+          fetch('/api/music/upload', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({filename:file.name, data:e.target.result})})
+            .then(function(r){ return r.json().then(function(j){ return {r:r, j:j}; }); })
+            .then(function(o){
+              uploadBtn.textContent = '上传音乐';
+              if(o.j && o.j.ok){ loadList(function(){ var i = list.findIndex(function(it){ return it.name===o.j.item.name; }); if(i>=0) loadSong(i); }); }
+              else { alert(o.j && o.j.error ? o.j.error : '上传失败'); }
+            })
+            .catch(function(){ uploadBtn.textContent='上传音乐'; alert('上传请求失败'); });
+        };
+        reader.readAsDataURL(file);
+      });
+      function renderList(){
+        if(!list.length){ listEl.innerHTML='<div class="music-empty">暂无音乐，点击「上传音乐」添加。</div>'; return; }
+        var ul = document.createElement('ul');
+        list.forEach(function(item, i){
+          var li = document.createElement('li');
+          li.className = (i===idx ? 'active' : '');
+          li.innerHTML = '<span class="name">' + item.name.replace(/\.[^/.]+$/, '') + '</span><span class="meta">' + (i===idx && !audio.paused ? '播放中' : '') + '</span>';
+          li.addEventListener('click', function(){ loadSong(i); });
+          ul.appendChild(li);
+        });
+        listEl.innerHTML = '';
+        listEl.appendChild(ul);
+      }
+      function loadList(cb){
+        fetch('/api/music/list')
+          .then(function(r){ return r.json(); })
+          .then(function(j){
+            list = (j && j.items) || [];
+            renderList();
+            if(cb) cb();
+          })
+          .catch(function(){ list=[]; renderList(); if(cb) cb(); });
+      }
+      loadList();
+
+      // 首次进入控制台：tab 脉冲提示一次（已点开过或提示过则不再重复）
+      try {
+        if (!sessionStorage.getItem('xfy_music_tab_hinted')) {
+          tab.classList.add('hint');
+          setTimeout(function () {
+            tab.classList.remove('hint');
+            sessionStorage.setItem('xfy_music_tab_hinted', '1');
+          }, 5200);
+          tab.addEventListener('click', function () {
+            tab.classList.remove('hint');
+            sessionStorage.setItem('xfy_music_tab_hinted', '1');
+          }, { once: true });
+        }
+      } catch (e) {}
+    })();
+  });
+</script>
 </body>
 
 </html>

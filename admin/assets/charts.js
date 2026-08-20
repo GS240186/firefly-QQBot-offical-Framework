@@ -1,4 +1,4 @@
-/* 小流萤 bot 管理后台 · 数据 + 图表 */
+﻿/* 小流萤 bot 管理后台 · 数据 + 图表 */
 
 (function () {
 
@@ -7,6 +7,56 @@
   // 这样 setOption 用到的 accent/ink/muted/rule 等永远跟随当前主题。
 
   var accent = '', accent2 = '', ink = '', muted = '', rule = '', green = '', warn = '', orange = '', bg2 = '';
+
+  // 带超时的 fetch 包装：避免后端请求 hang 住时占用浏览器连接池，导致整页卡死。
+  function _fetchWithTimeoutImpl(url, options, timeoutMs) {
+    timeoutMs = timeoutMs || 15000;
+    var controller = new AbortController();
+    var timer = setTimeout(function () { try { controller.abort(); } catch (e) {} }, timeoutMs);
+    return fetch(url, Object.assign({}, options || {}, { signal: controller.signal }))
+      .then(function (r) { clearTimeout(timer); return r; },
+            function (e) { clearTimeout(timer); throw e; });
+  }
+  // 对外暴露：保持 fetchWithTimeout 旧签名兼容；除显式传 0/负数才会"不超时"。
+  function fetchWithTimeout(url, options, timeoutMs) {
+    return _fetchWithTimeoutImpl(url, options, timeoutMs);
+  }
+
+  // ============================================================
+  // 全局 fetch 拦截：自动注入 AbortController + 默认 15s 超时
+  // 根因：浏览器对单源（127.0.0.1:9988）并发连接池上限仅 6 条。
+  //       AI 对话 hang 时若不切断，会占满连接池 → 其他 fetch 永远排队，
+  //       表现就是「用 AI 后整个控制台数据全加载不出来」「重启后也卡」。
+  // 修复：拦截 window.fetch，所有未显式传 signal 的请求自动加 15s 超时；
+  //       已用 fetchWithTimeout 的请求完全不受影响（它们已有自己的 controller）。
+  // ============================================================
+  if (!window.__xl_fetch_patched) {
+    window.__xl_fetch_patched = true;
+    var _origFetch = window.fetch.bind(window);
+    var _DEFAULT_TIMEOUT = 15000;
+    window.fetch = function patchedFetch(input, init) {
+      try {
+        init = init || {};
+        // 已经带 signal 或显式传超时标记 -> 放行，不包
+        if (init.signal || init.__noTimeout) return _origFetch(input, init);
+        var controller = new AbortController();
+        var timer = setTimeout(function () {
+          try { controller.abort(); } catch (e) {}
+        }, _DEFAULT_TIMEOUT);
+        var newInit = Object.assign({}, init, { signal: controller.signal });
+        return _origFetch(input, newInit).then(
+          function (r) { clearTimeout(timer); return r; },
+          function (e) {
+            clearTimeout(timer);
+            // AbortError 透传，便于上游 catch
+            throw e;
+          }
+        );
+      } catch (e) {
+        return _origFetch(input, init);
+      }
+    };
+  }
 
   function _refreshTheme() {
 
@@ -2029,7 +2079,7 @@
 
       if (it.scope === 'groups') scope = ' · 群聊';
 
-      else if (it.scope === 'persons') scope = ' · 好友';
+      else if (it.scope === 'persons') scope = ' · 单聊';
 
       else if (it.scope === 'custom') scope = ' · 自定义(' + (it.target_count || 0) + ')';
 
@@ -2063,557 +2113,325 @@
 
   // 已知群聊/个人缓存（全局，两处公告面板共享，避免重复请求）
 
-  var knownContacts = { groups: [], persons: [] };
-
+  // 已知群聊/个人/机器人缓存（全局，两处公告面板共享，避免重复请求）
+  var knownContacts = { groups: [], persons: [], bots: [] };
   var knownContactsLoaded = false;
 
   function loadKnownContacts() {
-
     return fetch(API_BASE + '/api/known-contacts', { cache: 'no-store' })
-
       .then(function (r) { return r.json(); })
-
       .then(function (j) {
-
         knownContacts = {
-
           groups: (j && j.groups) || [],
-
           persons: (j && j.persons) || [],
-
+          bots: (j && j.bots) || []
         };
-
         knownContactsLoaded = true;
-
         return knownContacts;
-
       })
-
       .catch(function () { return knownContacts; });
-
   }
 
-  // 单个公告面板控制器
-
+  // 单个公告面板控制器（支持「选机器人 + 选范围」）
   function AnnounceBoard(prefix) {
-
     this.prefix = prefix;
-
-    this.scope = 'all';          // all | groups | persons（全部 / 群聊 / 好友）
-
-    this.selectedGroups = {};    // 群聊模式下的勾选（chat_id -> true）
-
-    this.selectedPersons = {};   // 好友模式下的勾选
-
+    this.bot = '';               // 空 = 全部机器人
+    this.scope = 'all';          // all | groups | persons（全部 / 群聊 / 单聊）
+    this.selectedGroups = {};
+    this.selectedPersons = {};
     this.contactsRendered = false;
-
   }
 
   AnnounceBoard.prototype.el = function (id) {
-
     return document.getElementById(this.prefix + '-' + id);
-
   };
 
-  // 当前 scope 对应的受众列表 / 勾选桶
+  // 按所选机器人过滤受众（空 = 不过滤，全部机器人）
+  AnnounceBoard.prototype.filtered = function (list) {
+    var self = this;
+    if (!this.bot) return list;
+    return (list || []).filter(function (c) { return c.bot === self.bot; });
+  };
 
+  // 构建「选机器人」下拉（全部机器人 + 各 bot），并标记当前选择
+  AnnounceBoard.prototype.renderBotOptions = function () {
+    var sel = this.el('bot');
+    if (!sel) return;
+    var bots = knownContacts.bots || [];
+    var html = '<option value="">全部机器人</option>';
+    bots.forEach(function (b) {
+      var label = b.name_rt || b.name || b.appid_masked || b.appid || '';
+      var dot = b.connected ? '🟢 ' : '⚪ ';
+      html += '<option value="' + escapeHtml(b.appid) + '">' + dot + escapeHtml(label) + '</option>';
+    });
+    sel.innerHTML = html;
+    if (this.bot && sel.querySelector('option[value="' + escapeHtml(this.bot) + '"]')) {
+      sel.value = this.bot;
+    }
+  };
+
+  // 当前 scope 对应的受众列表 / 勾选桶（已按机器人过滤）
   AnnounceBoard.prototype.currentBucket = function () {
-
-    if (this.scope === 'groups') return { list: knownContacts.groups || [], bucket: this.selectedGroups, kind: '群聊' };
-
-    if (this.scope === 'persons') return { list: knownContacts.persons || [], bucket: this.selectedPersons, kind: '好友' };
-
+    if (this.scope === 'groups') return { list: this.filtered(knownContacts.groups || []), bucket: this.selectedGroups, kind: '群聊' };
+    if (this.scope === 'persons') return { list: this.filtered(knownContacts.persons || []), bucket: this.selectedPersons, kind: '单聊' };
     return { list: [], bucket: {}, kind: '' };
-
   };
 
   AnnounceBoard.prototype.renderContacts = function () {
-
     var listEl = this.el('target-list');
-
     var emptyEl = this.el('target-empty');
-
     var opsEl = this.el('select-ops');
-
     if (!listEl) return;
-
     var cur = this.currentBucket();
-
     var showList = cur.list.length > 0;
-
     if (opsEl) opsEl.classList.toggle('visible', this.scope !== 'all');
-
     if (!showList) {
-
       listEl.classList.remove('visible');
-
       if (emptyEl) {
-
         if (this.scope === 'all') {
-
           emptyEl.style.display = 'none';
-
         } else {
-
           emptyEl.textContent = '暂无已知' + cur.kind + '，先在监控中接收过消息才会显示';
-
           emptyEl.style.display = 'block';
-
         }
-
       }
-
       return;
-
     }
-
     if (emptyEl) emptyEl.style.display = 'none';
-
     listEl.classList.add('visible');
-
     var bucket = cur.bucket;
-
     listEl.innerHTML = cur.list.map(function (c) {
-
       var isGrp = c.chat_id.indexOf('g:') === 0;
-
       var label = c.name || c.openid;
-
       var cls = label && label === c.openid ? ' nm empty' : ' nm';
-
       return '<label class="ann-chk">' +
-
         '<input type="checkbox" data-chat="' + escapeHtml(c.chat_id) + '"' +
-
         (bucket[c.chat_id] ? ' checked' : '') + ' />' +
-
         '<span class="' + cls + '">' + escapeHtml(label) + '</span>' +
-
         '<span class="badge">' + (isGrp ? '群' : '人') + '</span>' +
-
         '</label>';
-
     }).join('');
-
     var self = this;
-
     Array.prototype.forEach.call(listEl.querySelectorAll('input[type=checkbox]'), function (cb) {
-
       cb.addEventListener('change', function () {
-
         var cid = cb.getAttribute('data-chat');
-
         if (cb.checked) bucket[cid] = true;
-
         else delete bucket[cid];
-
       });
-
     });
-
     this.contactsRendered = true;
-
   };
 
   AnnounceBoard.prototype.setScope = function (scope) {
-
     this.scope = scope;
-
     var sel = this.el('scope');
-
     if (sel && sel.value !== scope) sel.value = scope;
-
-    // 切换到群聊/好友时，若该桶为空则默认全选，方便「单选/全选」直接可用
-
+    // 切换到群聊/单聊时，若该桶为空则默认全选当前机器人下的受众
     if (scope === 'groups' && !Object.keys(this.selectedGroups).length) {
-
-      (knownContacts.groups || []).forEach(function (c) {
-
+      this.filtered(knownContacts.groups || []).forEach(function (c) {
         this.selectedGroups[c.chat_id] = true;
-
       }.bind(this));
-
     }
-
     if (scope === 'persons' && !Object.keys(this.selectedPersons).length) {
-
-      (knownContacts.persons || []).forEach(function (c) {
-
+      this.filtered(knownContacts.persons || []).forEach(function (c) {
         this.selectedPersons[c.chat_id] = true;
-
       }.bind(this));
-
     }
-
     this.renderContacts();
-
   };
 
-  // 根据当前 scope 计算要推送的受众 chat_id 列表
-
+  // 根据当前 bot + scope 计算要推送的受众 chat_id 列表
   AnnounceBoard.prototype.getTargets = function () {
-
-    if (this.scope === 'groups') {
-
-      return Object.keys(this.selectedGroups).filter(function (k) { return this.selectedGroups[k]; }.bind(this));
-
-    }
-
-    if (this.scope === 'persons') {
-
-      return Object.keys(this.selectedPersons).filter(function (k) { return this.selectedPersons[k]; }.bind(this));
-
-    }
-
-    // all：全部已知群聊 + 好友
-
-    return (knownContacts.groups || []).concat(knownContacts.persons || []).map(function (c) { return c.chat_id; });
-
+    var visible;
+    if (this.scope === 'groups') visible = this.filtered(knownContacts.groups || []);
+    else if (this.scope === 'persons') visible = this.filtered(knownContacts.persons || []);
+    else visible = this.filtered(knownContacts.groups || []).concat(this.filtered(knownContacts.persons || []));
+    if (this.scope === 'all') return visible.map(function (c) { return c.chat_id; });
+    var bucket = this.scope === 'groups' ? this.selectedGroups : this.selectedPersons;
+    return visible.filter(function (c) { return bucket[c.chat_id]; }).map(function (c) { return c.chat_id; });
   };
 
   AnnounceBoard.prototype.selectAll = function () {
-
     if (this.scope === 'groups') {
-
       this.selectedGroups = {};
-
-      (knownContacts.groups || []).forEach(function (c) { this.selectedGroups[c.chat_id] = true; }.bind(this));
-
+      this.filtered(knownContacts.groups || []).forEach(function (c) { this.selectedGroups[c.chat_id] = true; }.bind(this));
     } else if (this.scope === 'persons') {
-
       this.selectedPersons = {};
-
-      (knownContacts.persons || []).forEach(function (c) { this.selectedPersons[c.chat_id] = true; }.bind(this));
-
+      this.filtered(knownContacts.persons || []).forEach(function (c) { this.selectedPersons[c.chat_id] = true; }.bind(this));
     }
-
     this.renderContacts();
-
   };
 
   AnnounceBoard.prototype.clearSelection = function () {
-
-    if (this.scope === 'groups') {
-
-      this.selectedGroups = {};
-
-    } else if (this.scope === 'persons') {
-
-      this.selectedPersons = {};
-
-    }
-
+    if (this.scope === 'groups') this.selectedGroups = {};
+    else if (this.scope === 'persons') this.selectedPersons = {};
     this.renderContacts();
-
   };
 
   AnnounceBoard.prototype.showWarn = function (msg) {
-
     var wEl = this.el('warn');
-
     if (!wEl) return;
-
     wEl.textContent = msg || '';
-
     wEl.style.display = 'block';
-
   };
 
   AnnounceBoard.prototype.hideWarn = function () {
-
     var wEl = this.el('warn');
-
     if (wEl) wEl.style.display = 'none';
-
   };
 
   AnnounceBoard.prototype.showResult = function (push) {
-
     var rEl = this.el('result');
-
     if (!rEl) return;
-
     if (!push) { rEl.style.display = 'none'; return; }
-
     var html = '已发布到 ' + push.total + ' 个对象：<span class="ok">成功 ' + push.ok + '</span>';
-
-    if (push.failed > 0) {
-
-      html += '，<span class="bad">失败 ' + push.failed + '</span>';
-
-    }
-
+    if (push.failed > 0) html += '，<span class="bad">失败 ' + push.failed + '</span>';
     rEl.innerHTML = html;
-
     rEl.style.display = 'block';
-
   };
 
   AnnounceBoard.prototype.post = function (body) {
-
     var self = this;
-
     var targets = this.getTargets();
-
     var scope = this.scope;
-
-    var payload = { tag: '通知', body: body, scope: scope, target_count: targets.length };
-
+    var payload = { tag: '通知', body: body, scope: scope, target_count: targets.length, bot: this.bot };
     if (targets.length) payload.targets = targets;
-
     return fetch(API_BASE + '/api/announcement', {
-
       method: 'POST',
-
       headers: { 'Content-Type': 'application/json' },
-
       body: JSON.stringify(payload)
-
     }).then(function (r) { return r.json(); }).then(function (j) {
-
       loadAnnouncements('ann-list', 'ann-time');
-
       loadAnnouncements('data-ann-list', 'data-ann-time');
-
       self.showResult(j && j.push);
-
       return j;
-
     });
-
   };
 
   var announceBoards = {};
 
   function setupAnnounceBoard(prefix) {
-
     var board = new AnnounceBoard(prefix);
-
     announceBoards[prefix] = board;
 
     // scope 下拉列表
-
     var scopeSel = board.el('scope');
-
     if (scopeSel) {
+      scopeSel.addEventListener('change', function () { board.setScope(scopeSel.value); });
+    }
 
-      scopeSel.addEventListener('change', function () {
-
-        board.setScope(scopeSel.value);
-
+    // 机器人下拉：切换机器人时清空勾选并按新范围重渲染
+    var botSel = board.el('bot');
+    if (botSel) {
+      botSel.addEventListener('change', function () {
+        board.bot = botSel.value || '';
+        board.selectedGroups = {};
+        board.selectedPersons = {};
+        board.renderContacts();
       });
-
     }
 
     // 全选 / 清空
-
     var selAll = board.el('select-all');
-
     var selClear = board.el('select-clear');
-
     if (selAll) selAll.addEventListener('click', function () { board.selectAll(); });
-
     if (selClear) selClear.addEventListener('click', function () { board.clearSelection(); });
 
     // 发布
-
     var btn = board.el('submit');
-
     var input = board.el('input');
-
     if (btn && input) {
-
-      // ===== 防止浏览器自动填充历史 URL（如 ai provider 的 moonshot URL）污染公告内容 =====
-
+      // ===== 防止浏览器自动填充历史 URL 污染公告内容 =====
       try {
-
         input.setAttribute('autocomplete', 'off');
-
         input.setAttribute('type', 'text');
-
         input.setAttribute('name', 'announcement-body-' + prefix);
-
         input.setAttribute('data-form-type', 'other');
-
         input.setAttribute('data-lpignore', 'true');
-
         input.setAttribute('data-1p-ignore', 'true');
-
-        input.setAttribute('data-bwignore', 'true');   // Bitwarden
-
-        input.setAttribute('data-b24ignore', 'true');  // Bitwarden legacy
-
-        input.setAttribute('data-1password-ignore', 'true'); // 1Password
-
-        // 绑定到自动填充关键帧动画，便于 animationstart 事件捕获
-
+        input.setAttribute('data-bwignore', 'true');
+        input.setAttribute('data-b24ignore', 'true');
+        input.setAttribute('data-1password-ignore', 'true');
         input.style.setProperty('animation-name', 'onAutoFillStart, onAutoFillCancel', 'important');
-
         input.style.setProperty('-webkit-animation-name', 'onAutoFillStart, onAutoFillCancel', 'important');
-
         input.style.setProperty('animation-duration', '0.001s', 'important');
-
         input.style.setProperty('-webkit-animation-duration', '0.001s', 'important');
-
       } catch (e) {}
 
       function isAutoFillVal(v) {
-
         if (!v) return false;
-
         var t = String(v).trim();
-
         return /^https?:\/\/[^\s]+/i.test(t);
-
       }
-
       function clearAutoFill() {
-
         try { if (isAutoFillVal(input.value)) input.value = ''; } catch (e) {}
-
       }
-
-      // 1) Chrome 自动填充触发动画时清空（部分场景有效）
-
       input.addEventListener('animationstart', function (e) {
-
         if (e && (e.animationName === 'onAutoFillStart' || e.animationName === 'onAutoFillCancel' ||
-
                   e.animationName === '-webkit-onAutoFillStart' || e.animationName === '-webkit-onAutoFillCancel')) {
-
           clearAutoFill();
-
         }
-
       }, true);
-
-      // 2) input 事件兜底（用户正常输入不会以 http:// 开头）
-
       input.addEventListener('input', clearAutoFill);
-
-      // 3) 焦点进入时清空
-
       input.addEventListener('focus', clearAutoFill);
-
-      // 4) 真正的兜底：requestAnimationFrame 高频轮询，10 秒内只要发现 value 被自动填入 URL 立即清空
-
-      //    这能可靠捕获所有基于"异步修改 DOM property"的自动填充（Chrome 的某些 autofill 路径不触发任何事件）
-
-      //    注意：不要把 'input' 加进 markTouched——Chrome 自动填充也会触发 input 事件，会让 userTouched 被误设为 true 而立刻停掉 RAF
-
       var userTouched = false;
-
       function markTouched() { userTouched = true; }
-
       input.addEventListener('keydown', markTouched, true);
-
       input.addEventListener('beforeinput', markTouched, true);
-
       input.addEventListener('compositionstart', markTouched, true);
-
       input.addEventListener('paste', markTouched, true);
-
       input.addEventListener('drop', markTouched, true);
-
-      // 启动时立即清空（如果初始就是 URL 形态）
-
       clearAutoFill();
-
       var rafStart = Date.now();
-
       function rafLoop() {
-
-        if (userTouched) return; // 用户开始主动输入，停止干扰
-
+        if (userTouched) return;
         var now = Date.now();
-
-        // 每帧直接检测当前值，userTouched=false（用户没在输入）且值是 URL → 立即清空
-
-        if (isAutoFillVal(input.value)) {
-
-          try { input.value = ''; } catch (e) {}
-
-        }
-
-        if (now - rafStart < 10000) {
-
-          requestAnimationFrame(rafLoop);
-
-        }
-
+        if (isAutoFillVal(input.value)) { try { input.value = ''; } catch (e) {} }
+        if (now - rafStart < 10000) requestAnimationFrame(rafLoop);
       }
-
       requestAnimationFrame(rafLoop);
 
       btn.addEventListener('click', function () {
-
         var v = (input.value || '').trim();
-
         if (!v) return;
-
         var targets = board.getTargets();
-
         if (!targets.length) {
-
           if (board.scope === 'groups') board.showWarn('请至少选择一个群聊');
-
-          else if (board.scope === 'persons') board.showWarn('请至少选择一个好友');
-
-          else board.showWarn('暂无可发送的群聊或好友');
-
+          else if (board.scope === 'persons') board.showWarn('请至少选择一个单聊对象');
+          else board.showWarn('暂无可发送的群聊或单聊');
           return;
-
         }
-
         board.hideWarn();
-
         btn.disabled = true; input.disabled = true;
-
         board.post(v).finally(function () {
-
           input.value = ''; btn.disabled = false; input.disabled = false; input.focus();
-
         });
-
       });
-
       input.addEventListener('keydown', function (e) {
-
         if (e.key === 'Enter') btn.click();
-
       });
-
     }
 
-    // 首次渲染（确保 knownContacts 已加载），默认「全部」直接推送
-
-    loadKnownContacts().then(function () { board.setScope('all'); });
-
+    // 首次渲染（确保 knownContacts 已加载），默认「全部机器人 + 全部范围」
+    loadKnownContacts().then(function () {
+      board.renderBotOptions();
+      board.setScope('all');
+    });
     return board;
-
   }
 
   setupAnnounceBoard('ann');
-
   setupAnnounceBoard('data-ann');
 
-  // 后台定时刷新已知受众（新群/新人出现后约 15s 同步），并重渲染两个面板
-
+  // 后台定时刷新已知受众与机器人（新群/新人/新 bot 出现后约 15s 同步）
   setInterval(function () {
-
     loadKnownContacts().then(function () {
-
       Object.keys(announceBoards).forEach(function (p) {
-
+        announceBoards[p].renderBotOptions();
         announceBoards[p].renderContacts();
-
       });
-
     });
-
   }, 15000);
-
-  // ============================================================
 
   // 主循环
 
@@ -2807,10 +2625,8 @@
 
     'group-join-approval': '入群审批策略',
 
-    'feature-config': '功能配置',
-
+    'feature-config': '功能开关',
     'qa-rules': '问答规则',
-
     'personalize': '个性设置',
 
     'ai-chat': 'AI 对话',
@@ -2881,13 +2697,10 @@
 
     'group-join-approval': '群管理',
 
-    'feature-config': '功能中心',
-
-    'qa-rules': '功能中心',
-
-    'plugin-config': '插件中心',
-
-    'plugin-market': '插件中心',
+    'feature-config': '插件与功能',
+    'qa-rules': '插件与功能',
+    'plugin-config': '插件与功能',
+    'plugin-market': '插件与功能',
 
     'ai-chat': 'AI 智能',
 
@@ -3337,6 +3150,11 @@
 
     }
 
+    // 切换到交互设置页时加载配置
+    if (name === 'feature-menu') {
+      if (window.XFY_FM_renderMenu) window.XFY_FM_renderMenu();
+    }
+
     // 切换到问答规则页时加载规则
 
     if (name === 'qa-rules') {
@@ -3347,13 +3165,15 @@
 
     if (name === 'plugin-config') {
 
-      if (loadPluginConfigRef) loadPluginConfigRef();
+      if (typeof window.XFY_PC_renderConfig === 'function') window.XFY_PC_renderConfig();
+      else if (loadPluginConfigRef) loadPluginConfigRef();
 
     }
 
     if (name === 'plugin-market') {
 
-      if (loadPluginMarketRef) loadPluginMarketRef();
+      if (typeof window.XFY_PC_renderMarket === 'function') window.XFY_PC_renderMarket(false);
+      else if (loadPluginMarketRef) loadPluginMarketRef();
 
     }
 
@@ -3520,17 +3340,11 @@
   // 子菜单点击
 
   document.querySelectorAll('#side-nav .subitem[data-page]').forEach(function (it) {
-
     it.addEventListener('click', function () {
-
       var p = it.getAttribute('data-page');
-
       switchPage(p);
-
       try { history.replaceState(null, '', '#' + p); } catch (e) {}
-
     });
-
   });
 
   // 支持 URL hash 直接进入指定页
@@ -9429,6 +9243,14 @@
 
     if (botSel) botSel.addEventListener('change', loadGroups);
 
+    var refreshBtn = document.getElementById('grp-refresh-btn');
+
+    if (refreshBtn) refreshBtn.addEventListener('click', function () {
+
+      loadGroups();
+
+    });
+
     // 操作列事件委托：查看 / 删除
 
     if (tbody) {
@@ -10734,6 +10556,14 @@
 
     if (botSel) botSel.addEventListener('change', loadUsers);
 
+    var usrRefreshBtn = document.getElementById('usr-refresh-btn');
+
+    if (usrRefreshBtn) usrRefreshBtn.addEventListener('click', function () {
+
+      loadUsers();
+
+    });
+
     if (tbody) {
 
       tbody.addEventListener('click', function (e) {
@@ -10818,20 +10648,64 @@
 
   // ============================================================
 
-  // 功能配置中心
+  // 功能配置中心（功能开关 panel 已废弃：系统开关统一在「插件配置 → 系统列」管理）
+
+  // 此处仅保留 8 个内嵌 panel（流程图/视频限制/整点报时/入群通知/签到规则/违禁词管理/违禁词日志/问答规则）。
 
   // ============================================================
 
   (function featureConfigCenter() {
 
-    var currentCat = 'checkin';
+    // 默认子 tab 切到「流程图」，旧 config tab 已废弃
 
-    var currentTab = 'config';
+    var currentTab = 'flow';
 
-    var switches = {};
+    // 旧 loadFeatureConfigRef 注册点：功能开关已迁出，本页进入时不再拉 /api/system-config
 
-    var serverSwitches = {};
+    function onShow() { /* no-op: config panel 已废弃，仅保留 8 个子 panel */ }
 
+    loadFeatureConfigRef = onShow;
+
+    // 8 个子 panel 的 DOM 引用（用于 ftab 切换显示/隐藏）
+
+    var configPanel = document.getElementById('feature-config-panel');
+
+    var flowPanel = document.getElementById('feature-flow-panel');
+
+    var videoLimitsPanel = document.getElementById('feature-video-limits-panel');
+
+    var chimePanel = document.getElementById('feature-chime-panel');
+
+    var welcomePanel = document.getElementById('feature-welcome-panel');
+
+    var checkinRulesPanel = document.getElementById('feature-checkin-rules-panel');
+
+    var bannedMutePanel = document.getElementById('feature-banned-mute-panel');
+
+    var banwordLogPanel = document.getElementById('feature-banword-log-panel');
+
+    var allPanels = {
+
+      'config': configPanel,
+
+      'flow': flowPanel,
+
+      'video-limits': videoLimitsPanel,
+
+      'chime': chimePanel,
+
+      'welcome': welcomePanel,
+
+      'checkin-rules': checkinRulesPanel,
+
+      'banned-mute': bannedMutePanel,
+
+      'banword-log': banwordLogPanel,
+
+    };
+
+    // systemCategories 字典：旧功能开关 panel 已废弃（统一在插件配置「系统」列管理），
+    // 但仍被本页的「功能流程图」面板用于构建左侧分类/子功能关系树（buildFlowRelations）。
     var systemCategories = {
 
       checkin: {
@@ -10920,6 +10794,12 @@
 
           { k: 'game_horoscope', name: '今日运势', emoji: '🔮', desc: '发送「运势 星座」查运势' },
 
+          { k: 'game_wife_today', name: '今日老婆', emoji: '💕', desc: '发送「今日老婆」抽取今日专属二次元老婆（每日固定）' },
+
+          { k: 'game_brain_teaser', name: '脑筋急转弯', emoji: '🧠', desc: '发送「脑筋急转弯」随机出题；使用「脑筋作答/脑筋答案/脑筋跳过/脑筋下一题」互动，答错不直接泄露答案' },
+
+          { k: 'game_riddle', name: '猜谜语', emoji: '🎭', desc: '发送「猜谜语」随机出题；使用「谜语作答/谜语答案/谜语跳过/谜语下一题」互动，答错不直接泄露谜底' }
+
         ]
 
       },
@@ -10932,7 +10812,7 @@
 
           { k: 'tools', name: '系统总开关', emoji: '🛠', desc: '开启后整体启用工具系统', master: true },
 
-          { k: 'tool_weather', name: '天气查询', emoji: '🌤️', desc: '发送「天气 城市」查询天气' },
+          { k: 'tool_weather', name: '天气查询', emoji: '🌤️', desc: '发送「天气 城市 [天数]」查询天气（支持当天+未来最多7天，含实时/预警）' },
 
           { k: 'tool_wangzhe', name: '王者信息查询', emoji: '👑', desc: '发送「王者 英雄」查战力' },
 
@@ -10943,6 +10823,10 @@
           { k: 'tool_disease', name: '疾病信息', emoji: '🏥', desc: '发送「疾病信息 名称」查询常见疾病百科' },
 
           { k: 'tool_waste', name: '垃圾分类', emoji: '🗑️', desc: '发送「垃圾分类 名称」查询分类（可回收 / 有害 / 湿 / 干 / 大件）' },
+
+          { k: 'tool_navigation', name: '导航规划', emoji: '🧭', desc: '发送「导航 起点经度,起点纬度 终点经度,终点纬度」进行路线规划（示例：导航 104.06,30.67 104.07,30.68）' },
+
+          { k: 'tool_tourism', name: '旅游查询', emoji: '🏞️', desc: '发送「旅游 城市名」查询热门景点，如「旅游 成都」' },
 
         ]      },
 
@@ -10964,17 +10848,19 @@
 
       study: {
 
-        name: '学习系统', icon: '📚', sub: '学科题库与答题',
+        name: '学习系统', icon: '📚', sub: '知识问答 · 驾考学习 · 小学数学 · 古诗文查询',
 
         items: [
 
           { k: 'study', name: '系统总开关', emoji: '📚', desc: '开启后整体启用学习系统', master: true },
 
-          { k: 'study_menu', name: '学习菜单', emoji: '🗂️', desc: '发送「学习」打开科目菜单' },
+          { k: 'study_quiz', name: '知识问答', emoji: '❓', desc: '发送「知识问答」随机出题；使用「常识作答/常识答案/常识跳过/常识下一题」互动，答错不直接泄露答案' },
 
-          { k: 'study_query', name: '题库查询', emoji: '❓', desc: '发送「科目 文字/图片」搜题' },
+          { k: 'study_driving', name: '驾考学习', emoji: '🚗', desc: '发送「驾考学习」随机科目一/四题；使用「驾考作答/驾考答案/驾考跳过/驾考下一题」互动，答错不直接泄露答案' },
 
-          { k: 'study_answer', name: '答题判分', emoji: '✅', desc: '发送「作答 科目」进入作答' }
+          { k: 'study_math', name: '小学数学', emoji: '🔢', desc: '发送「小学数学」随机出一道小学数学题；使用「数学作答/数学答案/数学跳过/数学下一题」互动，答错不直接泄露答案' },
+
+          { k: 'study_poetry', name: '古诗文查询', emoji: '📜', desc: '发送「古诗文 关键词」查询古诗文，如「古诗文 静夜思」' }
 
         ]
 
@@ -11020,7 +10906,7 @@
 
           { k: 'image_wallpaper', name: '风景', emoji: '🌄', desc: '发送「风景」随机4K风景壁纸' },
 
-          { k: 'image_bizhi', name: '随机壁纸', emoji: '🖼️', desc: '发送「随机壁纸」随机高清壁纸' },
+          { k: 'image_bizhi', name: '随机壁纸', emoji: '🖼️', desc: '发送「随机壁纸」随机高清壁纸；双源随机切换（小小API wallpaper / 接口盒子 apihzimgbz）' },
 
           { k: 'image_yscos', name: '原神cos', emoji: '🎭', desc: '发送「原神cos」随机原神cosplay图片' },
 
@@ -11036,797 +10922,6 @@
 
     };
 
-    // 由 systemCategories 自动生成默认开关（含总开关与所有子功能，默认开启）
-
-    var defaultSwitches = {};
-
-    Object.keys(systemCategories).forEach(function (cat) {
-
-      systemCategories[cat].items.forEach(function (it) { defaultSwitches[it.k] = true; });
-
-    });
-
-    var menu = document.getElementById('feature-menu');
-
-    var titleEl = document.getElementById('feature-panel-title');
-
-    var subEl = document.getElementById('feature-panel-sub');
-
-    var formBody = document.getElementById('feature-form-body');
-
-    var banner = document.getElementById('feature-info-banner');
-
-    var saveBtn = document.getElementById('feature-save-btn');
-
-    var resetBtn = document.getElementById('feature-reset-btn');
-
-    var enableAllBtn = document.getElementById('feature-enable-all');
-
-    var disableAllBtn = document.getElementById('feature-disable-all');
-
-    var configPanel = document.getElementById('feature-config-panel');
-
-    var flowPanel = document.getElementById('feature-flow-panel');
-
-    var videoLimitsPanel = document.getElementById('feature-video-limits-panel');
-
-    var chimePanel = document.getElementById('feature-chime-panel');
-
-    var welcomePanel = document.getElementById('feature-welcome-panel');
-
-    var checkinRulesPanel = document.getElementById('feature-checkin-rules-panel');
-    var bannedMutePanel = document.getElementById('feature-banned-mute-panel');
-    var banwordLogPanel = document.getElementById('feature-banword-log-panel');
-
-    var flowSteps = document.getElementById('feature-flow-steps');
-
-    // === 多机器人独立功能配置 ===
-
-    var currentBot = '';              // 当前选中机器人 appid；空串 = 全局默认
-
-    var botSwitches = {};             // 服务端整体 bot_switches dict: {appid: {key:bool}}
-
-    var serverSwitchesGlobal = {};    // 服务端全局 switches（_system_switches）
-
-    var availableBots = [];           // 服务端 _list_runtime_bots().bots 列表
-
-    var botSelectEl = document.getElementById('feature-bot-select');
-
-    var botDotEl = document.getElementById('feature-bot-dot');
-
-    var resetBotBtn = document.getElementById('feature-reset-bot-btn');
-
-    var scopeHintEl = document.getElementById('feature-scope-hint');
-
-    if (!menu || !formBody) return;
-
-    function mergeSwitches(saved) {
-
-      var out = {};
-
-      Object.keys(defaultSwitches).forEach(function (k) { out[k] = defaultSwitches[k]; });
-
-      if (saved) { Object.keys(saved).forEach(function (k) { out[k] = !!saved[k]; }); }
-
-      return normalizeSwitches(out);
-
-    }
-
-    // 总开关关闭时，强制把该系统下所有子功能开关置为 false，保持前后端一致
-
-    function normalizeSwitches(state) {
-
-      Object.keys(systemCategories).forEach(function (cat) {
-
-        var items = systemCategories[cat].items;
-
-        if (!items || !items.length) return;
-
-        var masterKey = items[0].k;
-
-        if (!state[masterKey]) {
-
-          items.forEach(function (it) {
-
-            if (!it.master) state[it.k] = false;
-
-          });
-
-        }
-
-      });
-
-      return state;
-
-    }
-
-    function renderMenu() {
-
-      var html = '';
-
-      Object.keys(systemCategories).forEach(function (cat) {
-
-        var c = systemCategories[cat];
-
-        var active = cat === currentCat ? ' active' : '';
-
-        html += '<div class="feature-menu-item' + active + '" data-cat="' + cat + '"><span class="ico">' + c.icon + '</span>' + c.name + '</div>';
-
-      });
-
-      menu.innerHTML = html;
-
-    }
-
-    function switchHtml(item, on, disabled) {
-
-      return '<label class="switch' + (disabled ? ' disabled' : '') + '">' +
-
-        '<input type="checkbox" data-key="' + item.k + '"' + (on ? ' checked' : '') + (disabled ? ' disabled' : '') + '>' +
-
-        '<span class="track"></span><span class="thumb"></span>' +
-
-      '</label>';
-
-    }
-
-    function renderCategory() {
-
-      var c = systemCategories[currentCat];
-
-      if (!c) return;
-
-      if (titleEl) titleEl.textContent = c.icon + ' ' + c.name;
-
-      if (subEl) subEl.textContent = c.sub;
-
-      if (c.pluginManager) { renderPluginManager(); return; }
-
-      var masterKey = c.items[0].k;
-
-      var masterOn = !!switches[masterKey];
-
-      var html = '<div class="switch-list">';
-
-      c.items.forEach(function (item) {
-
-        var on = switches[item.k] !== undefined ? switches[item.k] : (defaultSwitches[item.k] || false);
-
-        if (item.master) {
-
-          html += '<div class="switch-row master-row">' +
-
-            '<div class="meta">' +
-
-              '<div class="name"><span class="emoji">' + item.emoji + '</span>' + escapeHtml(item.name) +
-
-                ' <span class="master-badge">总开关</span></div>' +
-
-              '<div class="desc">' + escapeHtml(item.desc) + '</div>' +
-
-            '</div>' +
-
-            switchHtml(item, on) +
-
-          '</div>';
-
-          html += '<div class="switch-divider">子功能</div>';
-
-          return;
-
-        }
-
-        var botOverride = currentBot && botSwitches[currentBot] && (item.k in botSwitches[currentBot]);
-
-        var effectiveGlobalVal = (serverSwitchesGlobal[item.k] !== undefined) ? !!serverSwitchesGlobal[item.k] : !!defaultSwitches[item.k];
-
-        var badge = '';
-
-        if (currentBot) {
-
-          if (botOverride) {
-
-            badge = ' <span class="override-badge" style="display:inline-block;padding:1px 6px;margin-left:6px;font-size:11px;border-radius:8px;background:#ede9fe;color:#6d28d9;">已覆盖</span>';
-
-          } else {
-
-            badge = ' <span class="inherit-badge" style="display:inline-block;padding:1px 6px;margin-left:6px;font-size:11px;border-radius:8px;background:#f3f4f6;color:#6b7280;">继承</span>';
-
-          }
-
-        }
-
-        html += '<div class="switch-row' + (masterOn ? '' : ' disabled') + '">' +
-
-          '<div class="meta">' +
-
-            '<div class="name"><span class="emoji">' + item.emoji + '</span>' + escapeHtml(item.name) + badge + '</div>' +
-
-            '<div class="desc">' + escapeHtml(item.desc) + (currentBot ? ' · 全局值: ' + (effectiveGlobalVal ? '开' : '关') : '') + '</div>' +
-
-          '</div>' +
-
-          switchHtml(item, on, !masterOn) +
-
-        '</div>';
-
-      });
-
-      html += '</div>';
-
-      formBody.innerHTML = html;
-
-    }
-
-    function renderPluginManager() {
-      if (!formBody) return;
-      formBody.innerHTML = '<div class="pm-loading">加载插件列表…</div>';
-      fetch(API_BASE + '/api/plugins', { cache: 'no-store' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          // 展示全部插件（内置 + 外置），按 is_external 正确打标（C3 修复：内置插件不再被隐藏）
-          var plugs = (data && data.plugins || []);
-          if (!plugs.length) {
-            formBody.innerHTML = '<div class="pm-empty">当前没有已安装的插件。</div>';
-            return;
-          }
-          plugs.sort(function (a, b) {
-            return (a.priority || 0) - (b.priority || 0);
-          });
-          var rows = plugs.map(function (p) {
-            var tag = p.is_external
-              ? '<span class="pm-tag pm-tag-ext">外置</span>'
-              : '<span class="pm-tag pm-tag-builtin">内置</span>';
-            var desc = p.description ? escapeHtml(p.description) : '<span class="pm-muted">无描述</span>';
-            // 内置插件由「功能开关」统一控制，无启停开关；仅外置插件显示开关
-            var toggle = p.is_external
-              ? '<label class="pm-switch" title="启用/停用">' +
-                  '<input type="checkbox" class="pm-toggle" ' + (p.enabled ? 'checked' : '') + ' data-key="' + escapeHtml(p.key) + '">' +
-                  '<span class="slider"></span></label>'
-              : '<span class="pm-muted" title="内置插件由功能开关统一控制" style="font-size:12px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;">功能开关</span>';
-            return '<div class="pm-row">' +
-              '<div class="pm-meta">' +
-                '<div class="pm-name">' + escapeHtml(p.name) + ' ' + tag +
-                  ' <span class="pm-key">' + escapeHtml(p.key) + '</span></div>' +
-                '<div class="pm-desc">' + desc + '</div>' +
-              '</div>' +
-              '<div class="pm-prio">优先级 ' + (p.priority != null ? p.priority : '-') + '</div>' +
-              '<div class="pm-action">' + toggle + '</div>' +
-            '</div>';
-          }).join('');
-          formBody.innerHTML =
-            '<div class="pm-toolbar">' +
-              '<button id="pm-reload-btn" class="pm-reload-btn">❔️ 热加载外置插件</button>' +
-              '<span class="pm-hint">修改 plugins/ 下文件后点此立即生效，无需重启 bot</span>' +
-            '</div>' +
-            '<div class="pm-list">' + rows + '</div>';
-          var reloadBtn = document.getElementById('pm-reload-btn');
-          if (reloadBtn) {
-            reloadBtn.addEventListener('click', function () {
-              reloadBtn.disabled = true;
-              reloadBtn.textContent = '⏳ 热加载中…';
-              fetch(API_BASE + '/api/plugins/reload', { method: 'POST' })
-                .then(function (r) { return r.json(); })
-                .then(function (d) {
-                  reloadBtn.disabled = false;
-                  reloadBtn.textContent = '❔️ 热加载外置插件';
-                  if (d && d.ok) {
-                    var s = d.stats || {};
-                    showToast('已热加载：新增 ' + (s.loaded||0) + ' / 重载 ' + (s.reloaded||0) + ' / 注销 ' + (s.unregistered||0) + (s.errors ? (' / 错误 ' + s.errors) : ''));
-                    renderPluginManager();
-                  } else {
-                    showToast('热加载失败：' + (d && d.error));
-                  }
-                })
-                .catch(function () {
-                  reloadBtn.disabled = false;
-                  reloadBtn.textContent = '❔️ 热加载外置插件';
-                  showToast('⚠️ 热加载请求失败');
-                });
-            });
-          }
-        })
-        .catch(function () {
-          formBody.innerHTML = '<div class="pm-empty">⚠️ 无法加载插件列表，请确认 bot 正在运行。</div>';
-        });
-    }
-
-    function setConnStatus(ok, msg) {
-
-      var el = document.getElementById('bot-conn-status');
-
-      if (!el) return;
-
-      if (ok) {
-
-        el.className = 'conn-status conn-ok';
-
-        el.textContent = msg || '已连接到机器人，开关修改将实时保存到本地文件并生效';
-
-      } else {
-
-        el.className = 'conn-status conn-fail';
-
-        el.textContent = '⚠️ 无法连接机器人：请先启动 bot.py，否则开关无法保存';
-
-      }
-
-    }
-
-    // 计算「当前作用域」生效开关：defaults ⊇ global switches ⊇ bot switches（若有）
-
-    function computeEffectiveSwitches() {
-
-      var src = {};
-
-      Object.keys(defaultSwitches).forEach(function (k) { src[k] = defaultSwitches[k]; });
-
-      Object.keys(serverSwitchesGlobal).forEach(function (k) { src[k] = !!serverSwitchesGlobal[k]; });
-
-      if (currentBot && botSwitches[currentBot]) {
-
-        Object.keys(botSwitches[currentBot]).forEach(function (k) { src[k] = !!botSwitches[currentBot][k]; });
-
-      }
-
-      return normalizeSwitches(src);
-
-    }
-
-
-
-    function renderBotSelector() {
-
-      if (!botSelectEl) return;
-
-      var html = '<option value="">🌐 全局默认（所有机器人）</option>';
-
-      availableBots.forEach(function (b) {
-
-        var name = b.name_rt || _sanitizeName(b.name, b.appid) || b.appid;
-
-        var on = b.connected ? ' ●' : '';
-
-        var cfg = botSwitches[b.appid] ? ' ⌗' : '';
-
-        html += '<option value="' + escapeHtml(b.appid) + '">' + escapeHtml(name) + ' · ' + escapeHtml(b.appid) + on + cfg + '</option>';
-
-      });
-
-      botSelectEl.innerHTML = html;
-
-      botSelectEl.value = currentBot;
-
-      // status dot
-
-      if (botDotEl) {
-
-        if (!currentBot) {
-
-          botDotEl.className = 'bsw-dot bsw-dot-online';
-
-        } else {
-
-          var target = availableBots.filter(function (b) { return b.appid === currentBot; })[0];
-
-          botDotEl.className = 'bsw-dot ' + (target && target.connected ? 'bsw-dot-online' : 'bsw-dot-offline');
-
-        }
-
-      }
-
-      // scope hint text
-
-      if (scopeHintEl) {
-
-        if (!currentBot) {
-
-          scopeHintEl.textContent = '🌐 当前编辑「全局默认」';
-
-          scopeHintEl.style.color = '#2563eb';
-
-        } else {
-
-          var ovr = botSwitches[currentBot] || {};
-
-          var ovrCount = Object.keys(ovr).length;
-
-          var target2 = availableBots.filter(function (b) { return b.appid === currentBot; })[0];
-
-          var disp = target2 ? (target2.name_rt || target2.name || target2.appid) : currentBot;
-
-          scopeHintEl.textContent = '🤖 当前仅编辑：' + disp + '（' + ovrCount + ' 项覆盖，其他开关继承全局）';
-
-          scopeHintEl.style.color = ovrCount > 0 ? '#7c3aed' : '#6b7280';
-
-        }
-
-      }
-
-      if (resetBotBtn) {
-
-        resetBotBtn.disabled = !currentBot || !(botSwitches[currentBot] && Object.keys(botSwitches[currentBot]).length);
-
-        resetBotBtn.style.opacity = resetBotBtn.disabled ? '0.5' : '1';
-
-      }
-
-    }
-
-
-
-    function loadConfig() {
-
-      // 加载全局 + bot 列表 + bot_switches
-
-      fetch(API_BASE + '/api/system-config', { cache: 'no-store' })
-
-        .then(function (r) { return r.json(); })
-
-        .then(function (data) {
-
-          serverSwitchesGlobal = (data && data.switches) || {};
-
-          botSwitches = (data && data.bot_switches) || {};
-
-          availableBots = (data && data.bots) || [];
-
-          switches = computeEffectiveSwitches();
-
-          serverSwitches = switches; // for legacy compat
-
-          renderBotSelector();
-
-          renderCategory();
-
-          setConnStatus(true);
-
-        })
-
-        .catch(function () {
-
-          switches = mergeSwitches({});
-
-          renderCategory();
-
-          setConnStatus(false);
-
-        });
-
-    }
-
-
-
-    // 切换机器人之前先把当前作用域的修改落盘
-
-    function switchBotScope(newBot) {
-
-      if (newBot === currentBot) return;
-
-      if (pendingSave) {
-
-        // 异步触发一次保存，保持当前作用域
-
-        saveConfig();
-
-      }
-
-      currentBot = newBot || '';
-
-      switches = computeEffectiveSwitches();
-
-      renderBotSelector();
-
-      renderCategory();
-
-    }
-
-
-
-    // 重置当前机器人的所有覆盖项
-
-    function resetCurrentBotOverrides() {
-
-      if (!currentBot) { showToast('全局默认无需重置'); return; }
-
-      if (!confirm('确认清空「' + currentBot + '」的所有功能覆盖项？\n该机器人将完全恢复为继承全局默认。')) return;
-
-      fetch(API_BASE + '/api/system-config', {
-
-        method: 'POST',
-
-        headers: { 'Content-Type': 'application/json' },
-
-        body: JSON.stringify({ bot: currentBot, reset: true })
-
-      })
-
-        .then(function (r) { return r.json(); })
-
-        .then(function (data) {
-
-          if (data && data.ok) {
-
-            showToast('已清空覆盖项');
-
-            loadConfig();
-
-          } else {
-
-            showToast('重置失败：' + (data && data.error));
-
-          }
-
-        })
-
-        .catch(function () { showToast('⚠️ 重置失败'); });
-
-    }
-
-    var pendingSave = false;
-
-    var isSaving = false;
-
-    function saveConfig() {
-
-      pendingSave = false;
-
-      if (isSaving) return; // 避免并发保存互相覆盖
-
-      isSaving = true;
-
-      console.log('[featureConfig] 保存开关 (bot=' + currentBot + ')', JSON.parse(JSON.stringify(switches)));
-
-      setConnStatus(true, '保存中…');
-
-      fetch(API_BASE + '/api/system-config', {
-
-        method: 'POST',
-
-        headers: { 'Content-Type': 'application/json' },
-
-        body: JSON.stringify({ bot: currentBot, switches: switches })
-
-      })
-
-        .then(function (r) {
-
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-
-          return r.json();
-
-        })
-
-        .then(function (data) {
-
-          isSaving = false;
-
-          console.log('[featureConfig] 保存响应', data);
-
-          if (data && data.ok) {
-
-            // 重新拉一次（写入侧也会更新 serverSwitchesGlobal / botSwitches）
-
-            fetch(API_BASE + '/api/system-config', { cache: 'no-store' })
-
-              .then(function (r2) { return r2.json(); })
-
-              .then(function (d2) {
-
-                serverSwitchesGlobal = (d2 && d2.switches) || {};
-
-                botSwitches = (d2 && d2.bot_switches) || {};
-
-                availableBots = (d2 && d2.bots) || availableBots;
-
-                renderBotSelector();
-
-                showToast(currentBot ? ('已保存到「' + currentBot + '」覆盖 ✓') : '全局配置已保存 ✓');
-
-                setConnStatus(true, '已连接到机器人，开关已实时保存到本地文件');
-
-              });
-
-          } else {
-
-            var msg = data && data.error ? data.error : '未知错误';
-
-            console.error('[featureConfig] 保存失败:', msg);
-
-            showToast('保存失败：' + msg);
-
-            setConnStatus(false);
-
-          }
-
-        })
-
-        .catch(function (err) {
-
-          isSaving = false;
-
-          console.error('[featureConfig] 保存异常:', err);
-
-          showToast('⚠️ 保存失败：请确认机器人(bot)正在运行');
-
-          setConnStatus(false);
-
-        });
-
-    }
-
-    // 页面关闭/刷新前兜底保存，避免刚改完就离开导致改动丢失
-
-    window.addEventListener('beforeunload', function () {
-
-      if (pendingSave) {
-
-        try {
-
-          fetch(API_BASE + '/api/system-config', {
-
-            method: 'POST',
-
-            headers: { 'Content-Type': 'application/json' },
-
-            body: JSON.stringify({ bot: currentBot, switches: switches }),
-
-            keepalive: true
-
-          });
-
-        } catch (e) {}
-
-      }
-
-    });
-
-
-
-    if (botSelectEl) {
-
-      botSelectEl.addEventListener('change', function () {
-
-        switchBotScope(botSelectEl.value);
-
-      });
-
-    }
-
-    if (resetBotBtn) {
-
-      resetBotBtn.addEventListener('click', resetCurrentBotOverrides);
-
-    }
-
-    function showToast(msg) {
-
-      var old = document.getElementById('feature-toast');
-
-      if (old) old.remove();
-
-      var div = document.createElement('div');
-
-      div.id = 'feature-toast';
-
-      div.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:8px;z-index:9999;font-size:13px;';
-
-      div.textContent = msg;
-
-      document.body.appendChild(div);
-
-      setTimeout(function () { div.remove(); }, 2000);
-
-    }
-
-    if (menu) {
-
-      menu.addEventListener('click', function (e) {
-
-        var item = e.target.closest('.feature-menu-item');
-
-        if (!item) return;
-
-        menu.querySelectorAll('.feature-menu-item').forEach(function (el) { el.classList.remove('active'); });
-
-        item.classList.add('active');
-
-        currentCat = item.getAttribute('data-cat');
-
-        renderCategory();
-
-      });
-
-    }
-
-    if (formBody) {
-
-      formBody.addEventListener('change', function (e) {
-
-        var inp = e.target.closest('.switch input');
-
-        if (!inp) return;
-
-        var key = inp.getAttribute('data-key');
-
-        var c = systemCategories[currentCat];
-
-        var masterKey = c.items[0].k;
-
-        switches[key] = !!inp.checked;
-
-        console.log('[featureConfig] 开关切换:', key, switches[key]);
-
-        // 关闭总开关时，同步关闭该系统的所有子功能并保持 UI 一致
-
-        if (key === masterKey && !inp.checked) {
-
-          c.items.forEach(function (it) {
-
-            if (!it.master) switches[it.k] = false;
-
-          });
-
-          renderCategory();
-
-        }
-
-        pendingSave = true; saveConfig();
-
-      });
-
-    }
-
-    // 外置插件启用/停用开关（仅停止分发，状态持久化，无需重启 bot）
-    if (formBody) {
-      formBody.addEventListener('change', function (e) {
-        var tog = e.target.closest && e.target.closest('.pm-toggle');
-        if (!tog) return;
-        var key = tog.getAttribute('data-key');
-        var enabled = !!tog.checked;
-        tog.disabled = true;
-        fetch(API_BASE + '/api/plugins/set-enabled', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: key, enabled: enabled })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            tog.disabled = false;
-            if (j && j.ok) {
-              try { showToast(j.message || ('已' + (enabled ? '启用' : '禁用') + '，已保存')); } catch (e) {}
-            } else {
-              tog.checked = !enabled;
-              alert((j && j.error) || '更新启用状态失败');
-            }
-          })
-          .catch(function () {
-            tog.disabled = false;
-            tog.checked = !enabled;
-            alert('更新失败：无法连接到后端');
-          });
-      });
-    }
-
-    if (enableAllBtn) enableAllBtn.addEventListener('click', function () {
-
-      (systemCategories[currentCat].items || []).forEach(function (it) { switches[it.k] = true; });
-
-      renderCategory();
-
-      pendingSave = true; saveConfig();
-
-    });
-
-    if (disableAllBtn) disableAllBtn.addEventListener('click', function () {
-
-      (systemCategories[currentCat].items || []).forEach(function (it) { switches[it.k] = false; });
-
-      renderCategory();
-
-      pendingSave = true; saveConfig();
-
-    });
-
     document.querySelectorAll('.feature-tab').forEach(function (tab) {
 
       tab.addEventListener('click', function () {
@@ -11835,29 +10930,27 @@
 
         tab.classList.add('active');
 
-        currentTab = tab.getAttribute('data-ftab');
+        var name = tab.getAttribute('data-ftab');
 
-        if (configPanel) configPanel.style.display = currentTab === 'config' ? 'block' : 'none';
+        // 旧 config tab 已废弃，强制切到 flow
 
-        if (flowPanel) flowPanel.style.display = currentTab === 'flow' ? 'block' : 'none';
+        var target = (name === 'config') ? 'flow' : name;
 
-        if (videoLimitsPanel) videoLimitsPanel.style.display = currentTab === 'video-limits' ? 'block' : 'none';
+        currentTab = target;
 
-        if (chimePanel) chimePanel.style.display = currentTab === 'chime' ? 'block' : 'none';
+        Object.keys(allPanels).forEach(function (k) {
 
-        if (welcomePanel) welcomePanel.style.display = currentTab === 'welcome' ? 'block' : 'none';
+          var p = allPanels[k];
 
-        if (checkinRulesPanel) checkinRulesPanel.style.display = currentTab === 'checkin-rules' ? 'block' : 'none';
+          if (p) p.style.display = (k === target) ? 'block' : 'none';
 
-        if (bannedMutePanel) bannedMutePanel.style.display = currentTab === 'banned-mute' ? 'block' : 'none';
+        });
 
-        if (banwordLogPanel) banwordLogPanel.style.display = currentTab === 'banword-log' ? 'block' : 'none';
+        if (target === 'welcome') { var we = document.getElementById('welcome-conn-status'); if (we) { we.className = 'conn-status conn-ok'; we.textContent = '已连接到机器人，修改将实时保存到本地文件'; } }
 
-        if (currentTab === 'welcome') { var we = document.getElementById('welcome-conn-status'); if (we) { we.className = 'conn-status conn-ok'; we.textContent = '已连接到机器人，修改将实时保存到本地文件'; } }
+        if (target === 'checkin-rules') { var ce = document.getElementById('checkin-rules-conn-status'); if (ce) { ce.className = 'conn-status conn-ok'; ce.textContent = '已连接到机器人，修改将实时保存到本地文件'; } }
 
-        if (currentTab === 'checkin-rules') { var ce = document.getElementById('checkin-rules-conn-status'); if (ce) { ce.className = 'conn-status conn-ok'; ce.textContent = '已连接到机器人，修改将实时保存到本地文件'; } }
-
-        if (currentTab === 'flow') {
+        if (target === 'flow') {
 
           var active = document.querySelector('#flow-relations .active');
 
@@ -11868,6 +10961,22 @@
       });
 
     });
+
+    // 页面打开时强制显示 flow 面板（隐藏已废弃的 config）
+
+    var firstTab = document.querySelector('.feature-tab[data-ftab="config"]');
+
+    if (firstTab) firstTab.classList.remove('active');
+
+    var flowTab = document.querySelector('.feature-tab[data-ftab="flow"]');
+
+    if (flowTab) flowTab.classList.add('active');
+
+    if (configPanel) configPanel.style.display = 'none';
+
+    if (flowPanel) flowPanel.style.display = 'block';
+
+    var flowSteps = document.getElementById('feature-flow-steps');
 
     var flowStepMap = {
 
@@ -11929,15 +11038,15 @@
 
         '校验娱乐系统总开关',
 
-        '识别棋类 / 猜成语 / 求签',
+        '识别棋类 / 猜成语 / 求签 / 今日老婆',
 
-        '初始化对局或出题 / 求签',
+        '初始化对局或出题 / 求签 / 抽取老婆',
 
-        '处理落子 / 作答 / 解签',
+        '处理落子 / 作答 / 解签 / 读取本地图库',
 
-        '判定胜负或积分',
+        '判定胜负或积分 / 固定日期随机',
 
-        '返回游戏状态'
+        '返回游戏状态 / 图片与文本'
 
       ],
 
@@ -11981,13 +11090,79 @@
 
         '校验学习系统总开关',
 
-        '识别题库查询或作答',
+        '识别知识问答 / 驾考学习 / 小学数学 / 古诗文查询',
 
-        '搜索题目或进入作答',
+        '调用 apihz.cn 对应题库接口',
 
-        '判分并生成解析',
+        '格式化题目/诗文内容',
 
         '返回学习结果'
+
+      ],
+
+      study_math: [
+
+        '用户发送「小学数学」',
+
+        '校验学习系统总开关与小学数学子开关',
+
+        '调用 apihz.cn 小学数学题接口',
+
+        '只发题目，带「数学答案」「数学跳过」按钮',
+
+        '用户发送「数学作答 答案」或点击按钮',
+
+        '判分：正确显示答案+解析+下一题，错误仅提示错误+答案按钮'
+
+      ],
+
+      study_quiz: [
+
+        '用户发送「知识问答」',
+
+        '校验学习系统总开关与知识问答子开关',
+
+        '调用 apihz.cn 随机社会常识题接口',
+
+        '只发题目，带「常识答案」「常识跳过」按钮',
+
+        '用户发送「常识作答 答案」或点击按钮',
+
+        '判分：正确显示答案+下一题，错误仅提示错误+答案按钮'
+
+      ],
+
+      study_driving: [
+
+        '用户发送「驾考学习」',
+
+        '校验学习系统总开关与驾考学习子开关',
+
+        '随机选择科目一/四',
+
+        '调用 apihz.cn 驾考题库接口',
+
+        '只发题目与选项，带「驾考答案」「驾考跳过」按钮',
+
+        '用户发送「驾考作答 选项」或点击按钮',
+
+        '判分：正确显示答案+解析+下一题，错误仅提示错误+答案按钮'
+
+      ],
+
+      study_poetry: [
+
+        '用户发送「古诗文 关键词」',
+
+        '校验学习系统总开关与古诗文查询子开关',
+
+        '调用 apihz.cn 古诗文大全接口',
+
+        '随机挑选一首结果',
+
+        '格式化诗文/作者/朝代/译文',
+
+        '返回结果'
 
       ],
 
@@ -12437,13 +11612,15 @@
 
     flowStepMap.tool_weather = [
 
-      '用户发送「天气 城市」',
+      '用户发送「天气 城市 [天数]」',
 
-      '解析城市名',
+      '解析城市名与可选天数（1~7，默认1）',
 
-      '调用天气查询接口',
+      '优先调用 apihz.cn 天气接口',
 
-      '格式化天气信息',
+      '失败回退到小渡天气接口',
+
+      '格式化实时/区间/多日/预警信息',
 
       '返回天气卡片'
 
@@ -12470,6 +11647,38 @@
       '调用运势接口',
 
       '返回今日运势'
+
+    ];
+
+    flowStepMap.game_brain_teaser = [
+
+      '用户发送「脑筋急转弯」',
+
+      '校验娱乐系统总开关与脑筋急转弯子开关',
+
+      '调用 apihz.cn 脑筋急转弯接口',
+
+      '只发题目，带「脑筋答案」「脑筋跳过」按钮',
+
+      '用户发送「脑筋作答 答案」或点击按钮',
+
+      '判分：正确显示答案+下一题，错误仅提示错误+答案按钮'
+
+    ];
+
+    flowStepMap.game_riddle = [
+
+      '用户发送「猜谜语」',
+
+      '校验娱乐系统总开关与猜谜语子开关',
+
+      '调用 apihz.cn 猜谜语接口',
+
+      '只发谜面，带「谜语答案」「谜语跳过」按钮',
+
+      '用户发送「谜语作答 答案」或点击按钮',
+
+      '判分：正确显示谜底+下一题，错误仅提示错误+答案按钮'
 
     ];
 
@@ -12541,6 +11750,38 @@
 
     ];
 
+    flowStepMap.tool_navigation = [
+
+      '用户发送「导航 起点经度,起点纬度 终点经度,终点纬度」',
+
+      '校验工具系统与导航规划子开关',
+
+      '调用 apihz.cn 导航接口（starlon/starlat/endlon/endlat 经纬度参数）',
+
+      '解析路线概要与分段步骤列表',
+
+      '简化并格式化路线步骤（保留关键转向/路口）',
+
+      '返回「🧭 路线规划」卡片（含概要 + 步骤）'
+
+    ];
+
+    flowStepMap.tool_tourism = [
+
+      '用户发送「旅游 城市名」',
+
+      '校验工具系统与旅游查询子开关',
+
+      '调用 apihz.cn 景点接口（words=城市名）',
+
+      '解析 datas[] 景点列表',
+
+      '格式化景点名称与前若干条',
+
+      '返回「🏞️ 热门景点」卡片（含城市名 + 景点清单）'
+
+    ];
+
     // 小说子功能
 
     flowStepMap.novel_menu = [
@@ -12568,44 +11809,6 @@
       '记录阅读进度',
 
       '返回章节内容'
-
-    ];
-
-    // 学习子功能
-
-    flowStepMap.study_menu = [
-
-      '用户发送「学习」',
-
-      '展示科目菜单',
-
-      '返回可选题库列表'
-
-    ];
-
-    flowStepMap.study_query = [
-
-      '用户发送「科目 文字 / 图片」',
-
-      '解析科目与题型',
-
-      '搜索匹配题目',
-
-      '返回题目卡片'
-
-    ];
-
-    flowStepMap.study_answer = [
-
-      '用户发送「作答 科目」',
-
-      '进入作答模式',
-
-      '按顺序展示题目',
-
-      '接收答案并判分',
-
-      '返回成绩与解析'
 
     ];
 
@@ -13103,291 +12306,17 @@
 
     renderFlowSteps('checkin');
 
-    if (saveBtn) saveBtn.addEventListener('click', saveConfig);
-
-    if (resetBtn) resetBtn.addEventListener('click', function () { loadConfig(); showToast('已恢复服务器配置'); });
-
-    function onShow() {
-
-      renderMenu();
-
-      loadConfig();
-
-    }
-
-    loadFeatureConfigRef = onShow;
-
   })();
 
 
-  (function pluginCenter() {
-    var configBody = document.getElementById('plugin-config-body');
-    var marketBody = document.getElementById('plugin-market-body');
-
-    function showToast(msg) {
-      var old = document.getElementById('plugin-toast');
-      if (old) old.remove();
-      var div = document.createElement('div');
-      div.id = 'plugin-toast';
-      div.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:8px;z-index:9999;font-size:13px;';
-      div.textContent = msg;
-      document.body.appendChild(div);
-      setTimeout(function () { div.remove(); }, 2200);
-    }
-
-    function renderPluginConfig() {
-      if (!configBody) return;
-      configBody.innerHTML = '<div class="pm-loading">加载插件列表…</div>';
-      fetch(API_BASE + '/api/plugins', { cache: 'no-store' })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          // 展示全部插件（内置 + 外置），按 is_external 正确打标（C3 修复：内置插件不再被隐藏）
-          var plugs = (data && data.plugins || []);
-          if (!plugs.length) {
-            configBody.innerHTML = '<div class="pm-empty">当前没有已安装的插件。</div>';
-            return;
-          }
-          plugs.sort(function (a, b) {
-            return (a.priority || 0) - (b.priority || 0);
-          });
-          var rows = plugs.map(function (p) {
-            var tag = p.is_external
-              ? '<span class="pm-tag pm-tag-ext">外置</span>'
-              : '<span class="pm-tag pm-tag-builtin">内置</span>';
-            var desc = p.description ? escapeHtml(p.description) : '<span class="pm-muted">无描述</span>';
-            // 内置插件由「功能开关」统一控制，无启停开关；仅外置插件显示开关
-            var toggle = p.is_external
-              ? '<label class="pm-switch" title="启用/停用">' +
-                  '<input type="checkbox" class="pm-toggle" ' + (p.enabled ? 'checked' : '') + ' data-key="' + escapeHtml(p.key) + '">' +
-                  '<span class="slider"></span></label>'
-              : '<span class="pm-muted" title="内置插件由功能开关统一控制" style="font-size:12px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;">功能开关</span>';
-            return '<div class="pm-row">' +
-              '<div class="pm-meta">' +
-                '<div class="pm-name">' + escapeHtml(p.name) + ' ' + tag +
-                  ' <span class="pm-key">' + escapeHtml(p.key) + '</span></div>' +
-                '<div class="pm-desc">' + desc + '</div>' +
-              '</div>' +
-              '<div class="pm-prio">优先级 ' + (p.priority != null ? p.priority : '-') + '</div>' +
-              '<div class="pm-action">' + toggle + '</div>' +
-            '</div>';
-          }).join('');
-          configBody.innerHTML =
-            '<div class="pm-toolbar">' +
-              '<button id="pm-reload-btn" class="pm-reload-btn">🔄 热加载外置插件</button>' +
-              '<span class="pm-hint">修改 plugins/ 下文件后点此立即生效，无需重启 bot</span>' +
-            '</div>' +
-            '<div class="pm-list">' + rows + '</div>';
-          var reloadBtn = document.getElementById('pm-reload-btn');
-          if (reloadBtn) {
-            reloadBtn.addEventListener('click', function () {
-              reloadBtn.disabled = true;
-              reloadBtn.textContent = '⏳ 热加载中…';
-              fetch(API_BASE + '/api/plugins/reload', { method: 'POST' })
-                .then(function (r) { return r.json(); })
-                .then(function (d) {
-                  reloadBtn.disabled = false;
-                  reloadBtn.textContent = '🔄 热加载外置插件';
-                  if (d && d.ok) {
-                    var s = d.stats || {};
-                    showToast('已热加载：新增 ' + (s.loaded||0) + ' / 重载 ' + (s.reloaded||0) + ' / 注销 ' + (s.unregistered||0) + (s.errors ? (' / 错误 ' + s.errors) : ''));
-                    renderPluginConfig();
-                  } else {
-                    showToast('热加载失败：' + (d && d.error));
-                  }
-                })
-                .catch(function () {
-                  reloadBtn.disabled = false;
-                  reloadBtn.textContent = '🔄 热加载外置插件';
-                  showToast('⚠️ 热加载请求失败');
-                });
-            });
-          }
-        })
-        .catch(function () {
-          configBody.innerHTML = '<div class="pm-empty">⚠️ 无法加载插件列表，请确认 bot 正在运行。</div>';
-        });
-    }
-
-    function renderPluginMarket() {
-      if (!marketBody) return;
-      marketBody.innerHTML = '<div class="pm-loading">加载插件市场…</div>';
-      // 同时拉取「已注册外置插件」与「市场模板目录」，解决「市场只显示模板、外置插件显示不完全」
-      Promise.all([
-        fetch(API_BASE + '/api/plugins', { cache: 'no-store' }).then(function (r) { return r.json(); }),
-        fetch(API_BASE + '/api/plugins/market', { cache: 'no-store' }).then(function (r) { return r.json(); })
-      ]).then(function (res) {
-        var remoteCatalog = (res[1] && res[1].catalog) || [];
-        var builtinTest = (res[1] && res[1].builtin_test) || [];
-        var repoUrl = (res[1] && res[1].repo_url) || "";
-        var remoteError = (res[1] && res[1].remote_error) || null;
-
-        function cardHtml(c, isRemote) {
-          var tag = isRemote
-            ? '<span class="pm-tag pm-tag-ext">仓库</span>'
-            : '<span class="pm-tag pm-tag-builtin">内置</span>';
-          var action;
-          if (c.installed) {
-            action = '<button class="pm-install-btn pm-uninstall" data-key="' + escapeHtml(c.key) + '">卸载</button>';
-          } else {
-            action = '<button class="pm-install-btn pm-install" data-key="' + escapeHtml(c.key) +
-              '" data-raw="' + escapeHtml(c.raw_url || '') + '">安装</button>';
-          }
-          var desc = c.description ? escapeHtml(c.description) : '<span class="pm-muted">无描述</span>';
-          return '<div class="pm-row pm-market-row">' +
-            '<div class="pm-meta">' +
-              '<div class="pm-name">' + escapeHtml(c.name) + ' ' + tag +
-                ' <span class="pm-key">' + escapeHtml(c.key) + '</span></div>' +
-              '<div class="pm-desc">' + desc + '</div>' +
-            '</div>' +
-            '<div class="pm-action">' + action + '</div>' +
-          '</div>';
-        }
-
-        var html = '';
-        html += '<div class="pm-market-head">' +
-                  '<div class="pm-market-title">插件市场（你的仓库）</div>' +
-                  '<div class="pm-repo-box">' +
-                    '<input id="pm-repo-url" class="pm-repo-input" placeholder="直接粘贴仓库地址，如 https://github.com/OWNER/REPO（留空用默认）" value="' + escapeHtml(repoUrl) + '">' +
-                    '<button id="pm-repo-save" class="pm-repo-save">保存</button>' +
-                  '</div>' +
-                '</div>';
-        if (remoteError) {
-          html += '<div class="pm-empty">⚠️ 远程仓库加载失败：' + escapeHtml(remoteError) + '（下方为内置测试插件）</div>';
-        }
-        if (remoteCatalog.length) {
-          html += '<div class="pm-section-title">可安装的仓库插件</div>';
-          html += '<div class="pm-list">' + remoteCatalog.map(function (c) { return cardHtml(c, true); }).join('') + '</div>';
-        } else if (!remoteError) {
-          html += '<div class="pm-empty">仓库暂无插件，或在上方填入你的插件仓库地址。</div>';
-        }
-        if (builtinTest.length) {
-          html += '<div class="pm-section-title">内置测试插件（随框架附带，不在仓库）</div>';
-          html += '<div class="pm-list">' + builtinTest.map(function (c) { return cardHtml(c, false); }).join('') + '</div>';
-        }
-        marketBody.innerHTML = html;
-
-        // 绑定安装/卸载按钮
-        marketBody.querySelectorAll('.pm-install-btn').forEach(function (b) {
-          b.addEventListener('click', function () {
-            var key = b.getAttribute('data-key');
-            var installing = b.classList.contains('pm-install');
-            b.disabled = true;
-            b.textContent = installing ? '⏳ 安装中…' : '⏳ 卸载中…';
-            fetch(API_BASE + '/api/plugins/market/' + (installing ? 'install' : 'uninstall'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ key: key, raw_url: (b.getAttribute('data-raw') || '') })
-            })
-              .then(function (r) { return r.json(); })
-              .then(function (d) {
-                if (d && d.ok) {
-                  showToast((installing ? '安装' : '卸载') + '成功：' + key);
-                  renderPluginMarket();
-                  if (loadPluginConfigRef) loadPluginConfigRef();
-                } else {
-                  b.disabled = false;
-                  b.textContent = installing ? '安装' : '卸载';
-                  showToast((installing ? '安装' : '卸载') + '失败：' + (d && d.error));
-                }
-              })
-              .catch(function () {
-                b.disabled = false;
-                b.textContent = installing ? '安装' : '卸载';
-                showToast('⚠️ 请求失败');
-              });
-          });
-        });
-
-        var repoSave = document.getElementById('pm-repo-save');
-        var repoInput = document.getElementById('pm-repo-url');
-        if (repoSave) {
-          repoSave.addEventListener('click', function () {
-            var v = ((repoInput && repoInput.value) || '').trim();
-            repoSave.disabled = true;
-            repoSave.textContent = '⏳ 保存中…';
-            fetch(API_BASE + '/api/runtime-settings', {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'save', key: 'plugin.market.repo_url', value: v, scope: 'global' })
-            })
-              .then(function (r) { return r.json(); })
-              .then(function (d) {
-                repoSave.disabled = false;
-                repoSave.textContent = '保存';
-                if (d && d.ok) { showToast('仓库地址已保存，正在刷新…'); renderPluginMarket(); }
-                else { showToast('保存失败：' + (d && d.error)); }
-              })
-              .catch(function () { repoSave.disabled = false; repoSave.textContent = '保存'; showToast('⚠️ 保存失败'); });
-          });
-        }
-
-      })
-      .catch(function () {
-        marketBody.innerHTML = '<div class="pm-empty">⚠️ 无法加载插件市场，请确认 bot 正在运行。</div>';
-      });
-    }
-
-    loadPluginConfigRef = renderPluginConfig;
-    loadPluginMarketRef = renderPluginMarket;
-
-    // 外置插件启用/停用开关（仅停止分发，状态持久化，无需重启 bot）
-    if (configBody) {
-      configBody.addEventListener('change', function (e) {
-        var tog = e.target.closest && e.target.closest('.pm-toggle');
-        if (!tog) return;
-        var key = tog.getAttribute('data-key');
-        var enabled = !!tog.checked;
-        tog.disabled = true;
-        fetch(API_BASE + '/api/plugins/set-enabled', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: key, enabled: enabled })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            tog.disabled = false;
-            if (j && j.ok) {
-              try { showToast(j.message || ('已' + (enabled ? '启用' : '禁用') + '，已保存')); } catch (e) {}
-            } else {
-              tog.checked = !enabled;
-              alert((j && j.error) || '更新启用状态失败');
-            }
-          })
-          .catch(function () {
-            tog.disabled = false;
-            tog.checked = !enabled;
-            alert('更新失败：无法连接到后端');
-          });
-      });
-    }
-
-    // 插件市场：外置插件启用/停用开关（与 config 页共用同一后端端点）
-    if (marketBody) {
-      marketBody.addEventListener('change', function (e) {
-        var tog = e.target.closest && e.target.closest('.pm-toggle');
-        if (!tog) return;
-        var key = tog.getAttribute('data-key');
-        var enabled = !!tog.checked;
-        tog.disabled = true;
-        fetch(API_BASE + '/api/plugins/set-enabled', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: key, enabled: enabled })
-        })
-          .then(function (r) { return r.json(); })
-          .then(function (j) {
-            tog.disabled = false;
-            if (j && j.ok) {
-              try { showToast(j.message || ('已' + (enabled ? '启用' : '禁用') + '，已保存')); } catch (e) {}
-            } else {
-              tog.checked = !enabled;
-              alert((j && j.error) || '更新启用状态失败');
-            }
-          })
-          .catch(function () {
-            tog.disabled = false;
-            tog.checked = !enabled;
-            alert('更新失败：无法连接到后端');
-          });
-      });
-    }
+  // 插件中心已重构为独立模块 admin/assets/plugin-center.js
+  // 切换页回调已改为优先调用 window.XFY_PC_renderConfig / XFY_PC_renderMarket
+  // 此处保留空 IIFE 以保持 charts.js 其它代码（loadPluginConfigRef / loadPluginMarketRef 引用）的执行顺序不被打断
+  (function pluginCenterStub() {
+    // 旧版 renderPluginConfig / renderPluginMarket 已迁移到 plugin-center.js
+    // 保留全局变量为 null，避免 charts.js 其它处引用 null 时崩
+    loadPluginConfigRef = null;
+    loadPluginMarketRef = null;
   })();
 
 
@@ -13949,6 +12878,7 @@
 
       var autoReplySw = document.getElementById('ai-auto-reply-switch');
 
+
       if (!box) return;
 
       // ---------- AI 自动回复开关 ----------
@@ -13988,6 +12918,7 @@
             var sw = (data && data.switches) || {};
 
             autoReplySw.checked = sw.ai !== false; // 默认开启
+
 
           })
 
@@ -14033,7 +12964,7 @@
 
             if (d && d.ok) {
 
-              showAutoReplyToast(on ? '✅ AI 自动回复已开启' : '⏸ AI 自动回复已关闭');
+              showAutoReplyToast(on ? '✅ 自配 AI 回复已开启' : '⏸ 自配 AI 回复已关闭');
 
             } else {
 
@@ -14061,7 +12992,10 @@
 
       }
 
+
+
       loadAutoReplyState();
+
 
       var history = [];
 
@@ -14099,7 +13033,7 @@
 
             if (modelSel) modelSel.innerHTML = html;
 
-            syncStatus(list.length > 0);
+            syncStatus(true);
 
           })
 
@@ -14171,7 +13105,7 @@
 
         busy = true;
 
-        fetch(API_BASE + '/api/ai/chat', {
+        fetchWithTimeout(API_BASE + '/api/ai/chat', {
 
           method: 'POST',
 
@@ -14179,7 +13113,7 @@
 
           body: JSON.stringify({ bot: bot, provider_id: provider, messages: history })
 
-        })
+        }, 35000)
 
           .then(function (r) { return r.json(); })
 
@@ -14217,11 +13151,13 @@
 
           })
 
-          .catch(function () {
+          .catch(function (e) {
 
             busy = false;
 
-            if (last) last.querySelector('.bubble').textContent = '请求失败，请检查网络或后端服务';
+            var reason = (e && e.name === 'AbortError') ? '请求超时（后端 35 秒未响应）' : '请求失败，请检查网络或后端服务';
+
+            if (last) last.querySelector('.bubble').textContent = '⚠️ ' + reason;
 
           });
 
@@ -15253,6 +14189,10 @@
 
     (function aiPersona() {
 
+      try {
+
+      console.log('[aiPersona] init start');
+
       var list = document.getElementById('ai-persona-list');
 
       var editName = document.getElementById('ai-persona-edit-name');
@@ -15465,17 +14405,20 @@
 
       }
 
-      function addNew() {
+      function addNew(name, prompt) {
 
-        fetch(API_BASE + '/api/ai/persona', {
+        name = (name || '').trim() || '新人格';
+        prompt = prompt || '';
+
+        fetchWithTimeout(API_BASE + '/api/ai/persona', {
 
           method: 'POST',
 
           headers: { 'Content-Type': 'application/json' },
 
-          body: JSON.stringify({ action: 'add', name: '新人格', prompt: '', active: false, bot: aiBotVal() })
+          body: JSON.stringify({ action: 'add', name: name, prompt: prompt, active: false, bot: aiBotVal() })
 
-        })
+        }, 15000)
 
           .then(function (r) { return r.json(); })
 
@@ -15495,7 +14438,48 @@
 
           })
 
-          .catch(function () { showToast('⚠️ 新建失败：请确认机器人正在运行'); });
+          .catch(function (e) {
+
+            var reason = (e && e.name === 'AbortError') ? '请求超时，请检查后端是否卡住' : '请确认机器人正在运行';
+
+            showToast('⚠️ 新建失败：' + reason);
+
+          });
+
+      }
+
+      // 新建人格：弹出 modal 填写名称/人设后再创建（避免之前「点击没反应」）
+      function openPersonaNewModal() {
+
+        var overlay = document.getElementById('ai-persona-new-modal');
+        var nameEl = document.getElementById('ai-persona-new-name');
+        var textEl = document.getElementById('ai-persona-new-text');
+
+        if (!overlay || !nameEl || !textEl) { addNew('新人格', ''); return; }
+
+        nameEl.value = '';
+        textEl.value = '';
+        overlay.style.display = 'flex';
+
+        setTimeout(function () { try { nameEl.focus(); } catch (_e) {} }, 30);
+
+        function closeModal() { overlay.style.display = 'none'; }
+
+        function doCreate() {
+          var nm = (nameEl.value || '').trim();
+          if (!nm) { showToast('请填写名称'); try { nameEl.focus(); } catch (_e) {} return; }
+          closeModal();
+          addNew(nm, textEl.value || '');
+        }
+
+        var closeBtn = document.getElementById('ai-persona-new-close');
+        var cancelBtn = document.getElementById('ai-persona-new-cancel');
+        var okBtn = document.getElementById('ai-persona-new-ok');
+
+        if (closeBtn) closeBtn.onclick = closeModal;
+        if (cancelBtn) cancelBtn.onclick = closeModal;
+        if (okBtn) okBtn.onclick = doCreate;
+        overlay.onclick = function (e) { if (e.target === overlay) closeModal(); };
 
       }
 
@@ -15559,11 +14543,11 @@
 
       if (list) list.addEventListener('click', function (e) {
 
+        if (e.target.closest('.kb-base-use-switch') || e.target.closest('input[type="checkbox"]')) return; // change 事件处理开关，避免触发 item 选择
+
         var rename = e.target.closest('.op-link.rename');
 
         var delLink = e.target.closest('.op-link.del');
-
-        var toggle = e.target.closest('input[type="checkbox"]');
 
         var item = e.target.closest('.kb-base-item');
 
@@ -15577,21 +14561,59 @@
 
           del(parseInt(delLink.getAttribute('data-id'), 10));
 
-        } else if (toggle) {
-
-          var id = parseInt(toggle.getAttribute('data-id'), 10);
-
-          // 立即给出视觉反馈
-
-          activeId = id; renderList();
-
-          if (toggle.checked) setActive(id);
-
-          else { /* 关闭 = 取消使用，回到默认人设 */ setActive(-1); }
-
-        } else if (item && !toggle) {
+        } else if (item) {
 
           select(parseInt(item.getAttribute('data-id'), 10));
+
+        }
+
+      });
+
+      if (list) list.addEventListener('change', function (e) {
+
+        var input = e.target;
+
+        if (!input || input.tagName !== 'INPUT' || input.type !== 'checkbox' || !input.hasAttribute('data-id')) return;
+
+        var id = parseInt(input.getAttribute('data-id'), 10);
+
+        activeId = input.checked ? id : null;
+
+        if (input.checked) setActive(id);
+
+        else { setActive(-1); }
+
+        // 即时视觉反馈：先清理所有项的使用中状态，再标记当前项
+
+        if (list) {
+
+          list.querySelectorAll('.kb-base-item.using').forEach(function (el) {
+
+            el.classList.remove('using');
+
+            var s = el.querySelector('.kb-base-state');
+
+            if (s) { s.className = 'kb-base-state off'; s.textContent = '未使用'; }
+
+          });
+
+        }
+
+        var parent = input.closest('.kb-base-item');
+
+        if (parent && input.checked) {
+
+          parent.classList.add('using');
+
+          var state = parent.querySelector('.kb-base-state');
+
+          if (state) {
+
+            state.className = 'kb-base-state on';
+
+            state.textContent = '使用中';
+
+          }
 
         }
 
@@ -15605,13 +14627,17 @@
 
       if (refreshBtn) refreshBtn.addEventListener('click', load);
 
-      if (addBtn) addBtn.addEventListener('click', addNew);
+      if (addBtn) addBtn.addEventListener('click', openPersonaNewModal);
 
       if (botSel) botSel.addEventListener('change', function () { load(); });
 
       function onShow() { fillBotSelect(botSel, '默认（全局 _shared）'); load(); }
 
       loadAiPersonaRef = onShow;
+
+      console.log('[aiPersona] init end');
+
+      } catch (_e) { console.error('[aiPersona] init error:', _e); }
 
     })();
 
@@ -15620,6 +14646,10 @@
     // ---------- 知识库（布局仿照人格设置：左列表 + 右编辑器，无弹窗） ----------
 
     (function aiKnowledge() {
+
+      try {
+
+      console.log('[aiKnowledge] init start');
 
       var botSel = document.getElementById('ai-knowledge-bot-select');
 
@@ -16023,15 +15053,17 @@
 
       }
 
-      function addNew() {
+      function addNew(name) {
 
-        fetch(API_BASE + '/api/ai/knowledge', {
+        name = (name || '').trim() || '新知识库';
+
+        fetchWithTimeout(API_BASE + '/api/ai/knowledge', {
 
           method: 'POST', headers: { 'Content-Type': 'application/json' },
 
-          body: JSON.stringify({ action: 'add_base', name: '新知识库', active: false, bot: aiBotVal() })
+          body: JSON.stringify({ action: 'add_base', name: name, active: false, bot: aiBotVal() })
 
-        })
+        }, 15000)
 
           .then(function (r) { return r.json(); })
 
@@ -16051,7 +15083,46 @@
 
           })
 
-          .catch(function () { showToast('⚠️ 新建失败：请确认机器人正在运行'); });
+          .catch(function (e) {
+
+            var reason = (e && e.name === 'AbortError') ? '请求超时，请检查后端是否卡住' : '请确认机器人正在运行';
+
+            showToast('⚠️ 新建失败：' + reason);
+
+          });
+
+      }
+
+      // 新建知识库：弹出 modal 填写名称后再创建（避免之前「点击没反应」）
+      function openKbNewModal() {
+
+        var overlay = document.getElementById('ai-kb-new-modal');
+        var nameEl = document.getElementById('ai-kb-new-name');
+
+        if (!overlay || !nameEl) { addNew('新知识库'); return; }
+
+        nameEl.value = '';
+        overlay.style.display = 'flex';
+
+        setTimeout(function () { try { nameEl.focus(); } catch (_e) {} }, 30);
+
+        function closeModal() { overlay.style.display = 'none'; }
+
+        function doCreate() {
+          var nm = (nameEl.value || '').trim();
+          if (!nm) { showToast('请填写名称'); try { nameEl.focus(); } catch (_e) {} return; }
+          closeModal();
+          addNew(nm);
+        }
+
+        var closeBtn = document.getElementById('ai-kb-new-close');
+        var cancelBtn = document.getElementById('ai-kb-new-cancel');
+        var okBtn = document.getElementById('ai-kb-new-ok');
+
+        if (closeBtn) closeBtn.onclick = closeModal;
+        if (cancelBtn) cancelBtn.onclick = closeModal;
+        if (okBtn) okBtn.onclick = doCreate;
+        overlay.onclick = function (e) { if (e.target === overlay) closeModal(); };
 
       }
 
@@ -16185,13 +15256,17 @@
 
       if (refreshBtn) refreshBtn.addEventListener('click', load);
 
-      if (addBaseBtn) addBaseBtn.addEventListener('click', addNew);
+      if (addBaseBtn) addBaseBtn.addEventListener('click', openKbNewModal);
 
       if (botSel) botSel.addEventListener('change', function () { load(); });
 
       function onShow() { fillBotSelect(botSel, '默认（全局 _shared）'); load(); }
 
       loadAiKnowledgeRef = onShow;
+
+      console.log('[aiKnowledge] init end');
+
+      } catch (_e) { console.error('[aiKnowledge] init error:', _e); }
 
     })();
 
@@ -18945,13 +18020,15 @@
 
     var costEl = document.getElementById('ck-lottery-cost');
 
+    var limitEl = document.getElementById('ck-lottery-daily-limit');
+
     var saveBtn = document.getElementById('checkin-rules-save-btn');
 
     var resetBtn = document.getElementById('checkin-rules-reset-btn');
 
     if (!baseEl || !saveBtn) return;
 
-    var DEFAULTS = { base_points: 10, bonus_per_day: 5, bonus_cap: 200, lottery_cost: 50 };
+    var DEFAULTS = { base_points: 10, bonus_per_day: 5, bonus_cap: 200, lottery_cost: 50, lottery_daily_limit: 2 };
 
     function setConn(bad, msg) {
 
@@ -19003,6 +18080,8 @@
 
           costEl.value = c.lottery_cost != null ? c.lottery_cost : DEFAULTS.lottery_cost;
 
+          if (limitEl) limitEl.value = c.lottery_daily_limit != null ? c.lottery_daily_limit : DEFAULTS.lottery_daily_limit;
+
           setConn(false);
 
         })
@@ -19021,7 +18100,9 @@
 
       var cost = parseInt(costEl.value, 10); if (isNaN(cost) || cost < 1) cost = 1; costEl.value = cost;
 
-      var payload = { base_points: base, bonus_per_day: per, bonus_cap: cap, lottery_cost: cost };
+      var limit = parseInt(limitEl ? limitEl.value : '2', 10); if (isNaN(limit) || limit < 0) limit = 0; if (limitEl) limitEl.value = limit;
+
+      var payload = { base_points: base, bonus_per_day: per, bonus_cap: cap, lottery_cost: cost, lottery_daily_limit: limit };
 
       setConn(false, '保存中…');
 
@@ -19043,7 +18124,7 @@
 
             baseEl.value = c.base_points; perEl.value = c.bonus_per_day;
 
-            capEl.value = c.bonus_cap; costEl.value = c.lottery_cost;
+            capEl.value = c.bonus_cap; costEl.value = c.lottery_cost; if (limitEl) limitEl.value = c.lottery_daily_limit;
 
             toast('签到规则已保存 ✓'); setConn(false);
 
@@ -19064,6 +18145,8 @@
       capEl.value = DEFAULTS.bonus_cap;
 
       costEl.value = DEFAULTS.lottery_cost;
+
+      if (limitEl) limitEl.value = DEFAULTS.lottery_daily_limit;
 
     }
 
@@ -19902,7 +18985,16 @@
 
           if (!data || !data.ok) throw new Error((data && data.error) || '清理失败');
 
-          toast('✅ 已清理 ' + (data.deleted_files || 0) + ' 个文件，释放 ' + (data.freed_human || '0 B'));
+          // 明细：每个分类实际删了多少文件、释放多少
+          var parts = [];
+          (data.details || []).forEach(function (d) {
+            if (d && d.deleted_files > 0) {
+              parts.push(d.label + ' ' + d.deleted_files + ' 个' + (d.freed_bytes > 0 ? '（' + fmtSize(d.freed_bytes) + '）' : ''));
+            }
+          });
+          var detailMsg = parts.length ? ('：' + parts.join('、')) : '（所选项均无可清理文件）';
+
+          toast('✅ 已清理 ' + (data.deleted_files || 0) + ' 个文件，释放 ' + (data.freed_human || '0 B') + detailMsg);
 
           // 刷新 stats
 
@@ -21163,3 +20255,35 @@
 
 })();
 
+
+  // ============== 全局：切换 page-feature-config 内的子 tab ==============
+  // 用于子菜单点击 video-limits/chime/welcome/checkin-rules/banned-mute/banword-log/qa-rules 时
+  // 跳转到「功能配置」页并自动切到对应 panel（避免在 page 上再开一堆新区域）
+  window.XFY_showSubFeature = function (name) {
+    try {
+      if (!name) return;
+      var tab = document.querySelector('.feature-tab[data-ftab="' + name + '"]');
+      if (tab) {
+        tab.click();
+      } else {
+        var panelMap = {
+          'config': 'feature-config-panel',
+          'flow': 'feature-flow-panel',
+          'video-limits': 'feature-video-limits-panel',
+          'chime': 'feature-chime-panel',
+          'welcome': 'feature-welcome-panel',
+          'checkin-rules': 'feature-checkin-rules-panel',
+          'banned-mute': 'feature-banned-mute-panel',
+          'banword-log': 'feature-banword-log-panel'
+        };
+        Object.keys(panelMap).forEach(function (k) {
+          var p = document.getElementById(panelMap[k]);
+          if (p) p.style.display = (k === name) ? 'block' : 'none';
+        });
+        document.querySelectorAll('.feature-tab').forEach(function (t) {
+          if (t.getAttribute('data-ftab') === name) t.classList.add('active');
+          else t.classList.remove('active');
+        });
+      }
+    } catch (e) { /* ignore */ }
+  };
